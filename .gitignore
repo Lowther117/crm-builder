@@ -1,0 +1,35 @@
+# build scratch
+.venv/
+.venv-build/
+.venv-build-mac/
+build/
+dist/
+*.spec
+
+# build and run output
+build-win-log.txt
+build-mac-log.txt
+crm-builder-selftest.txt
+crm-builder-crash.log
+crm-builder-settings.json
+crm-builder-settings.json.tmp
+.crm-builder-write-test
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# os
+.DS_Store
+Thumbs.db
+
+# never commit a CRM, its key file or its backups
+*.crm
+*.crm.keys
+*.crm.keys.tmp
+*.crm-journal
+*.crm-wal
+*.crm-shm
+*.part
+* backups/

@@ -1,0 +1,10 @@
+# Needed. Reads and writes Excel files (import, export). Pure Python.
+openpyxl>=3.1
+
+# Optional, and deliberately NOT listed here: sqlcipher3-wheels
+# It provides encrypted CRM files (SQLCipher). It is a compiled package with no
+# wheel for some Python versions (usually the very newest), so run.bat,
+# run.command, build-exe.bat and build-app.command install it in a separate
+# step and carry on without it when there is none - the app then works as
+# normal, only without the encryption option. To add it by hand:
+#   python -m pip install --only-binary :all: sqlcipher3-wheels
