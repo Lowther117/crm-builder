@@ -12,7 +12,7 @@ nothing you remove is ever deleted, only hidden.
 Everything lives in **one file** on your own computer or shared drive. Nothing
 is uploaded anywhere. Use it alone with no sign-in at all, or share the file
 with a small team where everyone has their own account. Windows and macOS, one
-window, dark mode by default.
+window, Phosphor purple theme by default (the same look as Winnow).
 
 Version 2 is a rebuild from scratch: one window instead of many, a far simpler
 Designer, and the wizard. It does not open files made by version 1.
@@ -28,7 +28,7 @@ Designer, and the wizard. It does not open files made by version 1.
 | `run.bat` | Windows, run from source without building an exe. Sets up a virtual environment the first time. |
 | `run.command` | macOS, run from source without building an app. |
 | `python crm_builder.py` | Any platform, if you already have Python 3.9+ with tkinter (`pip install -r requirements.txt` adds Excel support). A `.crm` file can be given as the first argument. |
-| `CRM Builder selftest` | Makes a CRM from every template in a temporary folder and exercises it - records, notes, tasks, files, search, accounts and permissions, encryption, CSV and Excel import - then opens every page of the window in dark and light, and writes `crm-builder-selftest.txt`. The build scripts run this on the finished app and refuse to say DONE unless it reads `SELF-TEST PASSED`. Also `run.bat selftest` / `./run.command selftest`. |
+| `CRM Builder selftest` | Makes a CRM from every template in a temporary folder and exercises it - records, notes, tasks, files, search, accounts and permissions, encryption, CSV and Excel import - then opens every page of the window in all three themes (phosphor, dark, light), and writes `crm-builder-selftest.txt`. The build scripts run this on the finished app and refuse to say DONE unless it reads `SELF-TEST PASSED`. Also `run.bat selftest` / `./run.command selftest`. |
 
 The repository is deliberately flat - no Windows/Mac subfolders. The extension
 already says which operating system a file is for.
@@ -79,7 +79,7 @@ steps, each of which can be accepted as it stands:
    records, which **Setup > Remove the example records** takes away again in
    one go.
 
-Going back and forth, or switching between dark and light, never loses what
+Going back and forth, or switching theme, never loses what
 you have typed.
 
 ---
@@ -132,7 +132,7 @@ CSV; **Tools > Export everything to Excel** writes the lot - a sheet per
 list, plus notes and tasks - so you are never locked in. Each record has a
 printable record sheet.
 
-**Keyboard.** Ctrl/Cmd+K search, +N new record, +S save, +D dark/light, +L
+**Keyboard.** Ctrl/Cmd+K search, +N new record, +S save, +D next theme (Phosphor / Dark / Light), +L
 lock, Alt+Left back, Esc close. Tab always moves to the next box, including
 out of multi-line boxes.
 
@@ -238,7 +238,7 @@ crmbuilder/
   importing.py     the import engine (match columns, check, bring in - all or nothing)
   paths.py         settings, the app folder, the default save folder
   selftest.py      the self-test
-  theme.py         the house light/dark theme (shared with the other apps, unmodified)
+  theme.py         the house theme - Phosphor purple, Dark, Light (shared with the other apps, unmodified)
   ui/
     app.py         the window: sidebar, menus, navigation, lock, picking up other people's changes
     styles.py      extra styles on top of theme.py (tick boxes, sidebar, headings)

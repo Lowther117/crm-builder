@@ -55,12 +55,13 @@ def pinned_font(root: tk.Misc, family: str, size: int, bold: bool = False):
     return got[0]
 
 
-def apply(root: tk.Misc, dark: bool) -> dict:
-    c = dict(theme.apply(root, dark))
+def apply(root: tk.Misc, mode) -> dict:
+    """`mode` is a house theme name (phosphor, dark, light) or the old dark flag."""
+    c = dict(theme.apply(root, mode))
     ui = theme.ui_family(root)
     c["ui"] = ui
     c["mono"] = theme.mono_family(root)
-    c["dark"] = dark
+    c["dark"] = c["is_dark"]          # phosphor and dark are both dark themes
     s = ttk.Style(root)
     P, B, SB = c["panel"], c["bg"], c["sidebar"]
     # Entry boxes, menus and classic widgets take Tk's named fonts, not the
@@ -185,8 +186,8 @@ def apply(root: tk.Misc, dark: bool) -> dict:
         thumb = c["field_border"]
         s.configure(name, background=thumb, troughcolor=B, bordercolor=B, lightcolor=thumb,
                     darkcolor=thumb, gripcount=0, gripsize=0, arrowsize=fs(11), relief="flat")
-        s.map(name, background=[("active", c["dim"]), ("pressed", c["dim"])],
-              lightcolor=[("active", c["dim"])], darkcolor=[("active", c["dim"])])
+        s.map(name, background=[("active", c["accent"]), ("pressed", c["accent"])],
+              lightcolor=[("active", c["accent"])], darkcolor=[("active", c["accent"])])
     s.configure("TNotebook", lightcolor=c["border"], darkcolor=c["border"], bordercolor=c["border"])
     s.configure("TNotebook.Tab", lightcolor=c["border"], bordercolor=c["border"],
                 font=(ui, fs(10)), padding=(10, 6))
@@ -225,7 +226,7 @@ def apply(root: tk.Misc, dark: bool) -> dict:
     return c
 
 
-# window -> {(style prefix, dark): pictures}. Keeps the tick-box pictures alive:
+# window -> {(style prefix, theme name): pictures}. Keeps the tick-box pictures alive:
 # Tk drops a picture nothing in Python refers to, and what it was drawn on
 # goes blank.
 _IMAGES: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
@@ -303,8 +304,8 @@ def _tick_boxes(root, s, c):
     size = max(14, fs(15))
     made = _IMAGES.setdefault(root, {})
     for prefix, back in (("", c["bg"]), ("Panel.", c["panel"]), ("Hint.", c["hint"])):
-        key = (prefix, c["dark"])
-        element = f"{prefix.replace('.', '')}Tick{'D' if c['dark'] else 'L'}.indicator"
+        key = (prefix, c["name"])
+        element = f"{prefix.replace('.', '')}Tick{c['name'][0].upper()}.indicator"
         # An element can be made only once, and goes on using the pictures it
         # was made with. So when the theme is switched back, the first set must
         # still be there: making (and keeping) a second set would let the first

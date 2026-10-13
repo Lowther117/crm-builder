@@ -947,7 +947,7 @@ def _gui_tour(rep: Report, root, tmp: str, opened: list):
         return True
 
     def theme() -> str:
-        return "dark" if app.dark else "light"
+        return app.theme_name
 
     # ---- screens shown before a CRM is open
     locked = None
@@ -970,7 +970,7 @@ def _gui_tour(rep: Report, root, tmp: str, opened: list):
                 continue
             kw = {"db": locked}
         fine = True
-        for _pass in (0, 1):
+        for _pass in (0, 1, 2):        # the current theme, then the other two
             label = f"screen '{name}' ({theme()})"
 
             def show(name=name, kw=kw):
@@ -985,7 +985,7 @@ def _gui_tour(rep: Report, root, tmp: str, opened: list):
         if fine:
             shown.append(name)
     if shown:
-        rep.ok(f"{len(shown)} start screens open in dark and light", " ".join(shown))
+        rep.ok(f"{len(shown)} start screens open in phosphor, dark and light", " ".join(shown))
     attempt("back to the welcome screen", lambda: app.show_screen("welcome"))
     if locked is not None:
         locked.close()
@@ -1010,9 +1010,9 @@ def _gui_tour(rep: Report, root, tmp: str, opened: list):
             if entered:
                 rep.fail(f"window: opening the '{key}' CRM", "the main window was not built")
             continue
-        for _pass in (0, 1):
+        for _pass in (0, 1, 2):        # all three themes, ending where it began
             _tour(rep, app, attempt, classes, key, theme())
-            attempt(f"window: '{key}' switching to {'light' if app.dark else 'dark'}", app.toggle_dark)
+            attempt(f"window: '{key}' switching theme from {theme()}", app.toggle_dark)
     rep.doing = "closing the window"
     if app.db is not None:
         app.db.close()

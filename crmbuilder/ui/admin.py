@@ -13,7 +13,7 @@ from tkinter import ttk
 
 from .. import blueprint as bpm
 from .. import db as dbm
-from .. import paths, security, validate
+from .. import paths, security, theme, validate
 from . import widgets
 from .base import Page
 from .recordpage import ACTION_WORDS, human_size
@@ -935,18 +935,19 @@ class SettingsPage(_ScrollPage):
     def _appearance(self):
         app = self.app
         card = self.card("Appearance")
-        right, _lab = self.line(card, "Dark mode is on." if app.dark else "Light mode is on.",
-                                f"{widgets.MOD_LABEL}+D switches at any time.", pady=(4, 0))
-        self.light_btn = ttk.Button(right, text="Light", style="Seg.TButton" if app.dark else "SegOn.TButton",
-                                    command=lambda: self.set_dark(False))
-        self.dark_btn = ttk.Button(right, text="Dark", style="SegOn.TButton" if app.dark else "Seg.TButton",
-                                   command=lambda: self.set_dark(True))
-        self.dark_btn.pack(side="right")
-        self.light_btn.pack(side="right", padx=(0, 4))
+        right, _lab = self.line(card, f"{theme.label(app.theme_name)} is on.",
+                                f"{widgets.MOD_LABEL}+D moves to the next theme at any time.", pady=(4, 0))
+        self.theme_btns = {}
+        for name in reversed(theme.ORDER):          # packed right to left
+            b = ttk.Button(right, text=theme.short_label(name),
+                           style="SegOn.TButton" if app.theme_name == name else "Seg.TButton",
+                           command=lambda n=name: self.app.set_theme(n))
+            b.pack(side="right", padx=(0, 0 if name == theme.ORDER[-1] else 4))
+            self.theme_btns[name] = b
 
     def set_dark(self, dark: bool):
-        if self.app.dark != dark:
-            self.app.toggle_dark()
+        """Older callers: True = the default dark theme (phosphor), False = light."""
+        self.app.set_theme(theme.resolve(bool(dark)))
 
     # -------------------------------------------------------------- saving
     def _saving(self):

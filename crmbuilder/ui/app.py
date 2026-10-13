@@ -13,6 +13,7 @@ from tkinter import ttk
 from .. import APP_NAME, FILE_EXT, __version__, paths
 from .. import blueprint as bpm
 from .. import db as dbm
+from .. import theme
 from . import styles, widgets
 from .styles import fs
 from .widgets import MOD, MOD_LABEL
@@ -48,8 +49,9 @@ class App:
         self.test_log: list = []
         self.test_answers: list = []
         self.settings = paths.load_settings() if not testing else {}
-        self.dark = bool(self.settings.get("dark", True))
-        self.c = styles.apply(root, self.dark)
+        self.theme_name = theme.from_settings(self.settings)   # phosphor purple by default
+        self.dark = theme.is_dark(self.theme_name)
+        self.c = styles.apply(root, self.theme_name)
         self.db: dbm.Database | None = None
         self.page = None
         self.page_name = ""
@@ -362,12 +364,21 @@ class App:
 
     # ------------------------------------------------------------- theme
     def toggle_dark(self):
+        """Ctrl+D / Cmd+D: the next theme, Phosphor -> Dark -> Light."""
+        self.set_theme(theme.next_theme(self.theme_name))
+
+    def set_theme(self, name: str):
         if self._grabbed() or self._locked:
             return
-        self.dark = not self.dark
+        name = theme.resolve(name)
+        if name == self.theme_name:
+            return
+        self.theme_name = name
+        self.dark = theme.is_dark(name)
+        self.settings["theme"] = name
         self.settings["dark"] = self.dark
         self.save_settings()
-        self.c = styles.apply(self.root, self.dark)
+        self.c = styles.apply(self.root, self.theme_name)
         self.rebuild()
 
     def save_settings(self):
@@ -634,7 +645,7 @@ class App:
         bar.add_cascade(label="File", menu=m)
 
         m = styles.menu(bar, c)
-        m.add_command(label="Light mode" if self.dark else "Dark mode", accelerator=acc + "D",
+        m.add_command(label=f"{theme.label(theme.next_theme(self.theme_name))} theme", accelerator=acc + "D",
                       command=self.toggle_dark)
         if open_db:
             m.add_separator()
