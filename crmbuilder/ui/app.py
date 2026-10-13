@@ -92,6 +92,8 @@ class App:
         widgets.install_wheel(root)
         self._bind_keys()
         root.report_callback_exception = self._callback_error
+        if not self.testing:
+            paths.clean_open_copies(stale_hours=12)     # (left by a run that did not close properly)
 
         start = open_path or self.settings.get("last_db")
         if start and os.path.isfile(start):
@@ -446,11 +448,14 @@ class App:
         """A CRM is open and signed in: show the main window."""
         if self.db is not None and self.db is not db:
             self.db.close()
+            paths.clean_open_copies()
         self.db = db
         self.history = []
         if not self.testing:
             paths.remember_recent(self.settings, db.path)
-            db.daily_backup()
+            # once the window is up (a big CRM on a network drive takes a while to copy)
+            self.root.after(1500, lambda: self.db is db and db.conn is not None
+                            and db.daily_backup())
         self._data_version = db.data_version()
         self._last_activity = time.time()
         self._build_shell()
@@ -464,6 +469,7 @@ class App:
         if self.db is not None:
             self.db.close()
         self.db = None
+        paths.clean_open_copies()
         self.settings.pop("last_db", None)
         self.save_settings()
         self.show_screen("welcome")
@@ -499,6 +505,7 @@ class App:
             pass
         if self.db is not None:
             self.db.close()
+        paths.clean_open_copies()
         self.root.destroy()
 
     # -------------------------------------------------------------- shell
@@ -673,7 +680,7 @@ class App:
                 m.add_command(label="Change the design…", command=lambda: self.go("design"))
                 m.add_command(label="People and passwords…", command=lambda: self.go("people"))
             m.add_command(label="Settings…", command=lambda: self.go("settings"))
-            if self.db.can_edit and self.db.has_examples():
+            if self.db.is_admin and self.db.has_examples():
                 m.add_separator()
                 m.add_command(label="Remove the example records", command=self.remove_examples)
             bar.add_cascade(label="Setup", menu=m)
@@ -736,7 +743,8 @@ class App:
     def remove_examples(self):
         if not widgets.confirm(self, "Remove the example records",
                                "This erases the example records the setup wizard added, with "
-                               "their notes and tasks. Records you added yourself are not touched.",
+                               "their example tasks. Records you added yourself are not touched, "
+                               "nor are examples you have added a note, file or task to.",
                                yes="Remove examples", danger=True):
             return
         n = self.db.remove_examples()

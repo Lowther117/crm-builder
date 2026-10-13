@@ -397,6 +397,7 @@ def write_report(path: str, report: dict) -> None:
         ws.freeze_panes = "A2"
         wb.save(path)
         return
+    from .admin import csv_safe
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
         w.writerow(head)
@@ -406,7 +407,7 @@ def write_report(path: str, report: dict) -> None:
                 return ""
             return int(v) if float(v).is_integer() else round(v, 2)
         for r in report["rows"]:
-            line = [r["label"], plain(r["value"])]
+            line = [csv_safe(r["label"]), plain(r["value"])]
             if report["show_share"]:
                 line.append("" if r["share"] is None else f"{r['share'] * 100:.1f}%")
             w.writerow(line)

@@ -733,7 +733,7 @@ class SettingsPage(_ScrollPage):
         self._backups()
         self._saving()
         self._security()
-        if self.db.has_examples() and self.db.can_edit:
+        if self.db.has_examples() and self.db.is_admin:
             self._examples()
 
     # ------------------------------------------------------------ this CRM
@@ -976,7 +976,8 @@ class SettingsPage(_ScrollPage):
     def _examples(self):
         card = self.card("Example records")
         right, _lab = self.line(card, "This CRM still has the example records from when it was set up.",
-                                "Removing them leaves the records you added yourself alone.",
+                                "Removing them leaves alone the records you added yourself, "
+                                "and any example you have added a note, file or task to.",
                                 pady=(4, 0))
         self.examples_btn = ttk.Button(right, text="Remove the example records",
                                        command=self.app.remove_examples)

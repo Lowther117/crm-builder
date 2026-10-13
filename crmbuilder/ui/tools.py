@@ -287,11 +287,15 @@ def record_rows(db, type_def: dict, records: list[dict], progress: Progress | No
 
 
 def write_csv(path: str, rows):
-    """UTF-8 with a byte-order mark, which is what makes Excel show £ and accents properly."""
+    """UTF-8 with a byte-order mark, which is what makes Excel show £ and accents properly.
+    Text that a spreadsheet would take for a formula gets a ' in front (numbers,
+    phone numbers and dates are left as they are; the importer takes the ' off)."""
+    from .admin import csv_safe
     tmp = path + ".part"
     try:
         with open(tmp, "w", newline="", encoding="utf-8-sig") as fh:
-            csv.writer(fh).writerows(rows)
+            csv.writer(fh).writerows([csv_safe(c) if isinstance(c, str) else c for c in row]
+                                     for row in rows)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):

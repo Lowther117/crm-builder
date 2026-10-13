@@ -5,13 +5,12 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 import tkinter as tk
 from tkinter import ttk
 
 from .. import blueprint as bpm
 from .. import db as dbm
-from .. import validate
+from .. import paths, validate
 from . import styles, widgets
 from .base import Page
 from .picker import save_new_record
@@ -32,6 +31,11 @@ def human_size(n: int) -> str:
             return f"{n:.0f} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
         n /= 1024
     return ""
+
+
+# Opening one of these runs it: a program, a script or a shortcut to one.
+RUNS = {".exe", ".bat", ".cmd", ".com", ".ps1", ".js", ".jse", ".vbs", ".vbe", ".wsf", ".lnk",
+        ".command", ".app", ".msi", ".scr", ".pif", ".jar", ".sh"}
 
 
 def open_path(path: str):
@@ -459,7 +463,7 @@ class RecordPage(Page):
                 bits.append(who)
             if bits:
                 ttk.Label(col, text="  ·  ".join(bits), style=style).pack(anchor="w")
-            if can:
+            if can and db.may_remove(t["created_by"]):
                 widgets.link(item, "×", lambda t=t: self.remove_task(t),
                              style="PanelLink.TLabel").pack(side="right", anchor="n")
 
@@ -518,7 +522,7 @@ class RecordPage(Page):
             ttk.Label(line, text=f"{human_size(f['size'])}  ·  added "
                                  f"{validate.format_stamp(f['added_at'])[:10]}",
                       style="PanelHelp.TLabel").pack(side="left")
-            if can:
+            if can and db.may_remove(f["added_by"]):
                 widgets.link(line, "Remove", lambda f=f: self.remove_file(f),
                              style="PanelLink.TLabel").pack(side="right")
             widgets.link(line, "Save a copy…", lambda f=f: self.save_file(f),
@@ -549,8 +553,14 @@ class RecordPage(Page):
         if not got:
             return
         name, blob = got
+        if os.path.splitext(name)[1].lower() in RUNS and not widgets.confirm(
+                self.app, "Run this file?",
+                f"“{name}” is a program or script: opening it runs it on this computer. Only "
+                "do that if you trust where it came from.\n\nTo look at it without running "
+                "it, use “Save a copy…” instead.", yes="Run it", danger=True):
+            return
         try:
-            folder = tempfile.mkdtemp(prefix="crm-builder-")
+            folder = paths.open_copy_dir()
             path = os.path.join(folder, os.path.basename(name) or "file")
             with open(path, "wb") as fh:
                 fh.write(blob)

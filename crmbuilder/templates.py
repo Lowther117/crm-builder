@@ -474,5 +474,6 @@ def load_samples(db, key: str) -> int:
         for type_key, idx, title, days in SAMPLE_TASKS.get(key, []):
             ids = made.get(type_key, [])
             if idx < len(ids) and ids[idx]:
-                db.add_task(title, due=_d(days), record_id=ids[idx], assigned_to=db.user["id"])
+                db.add_task(title, due=_d(days), record_id=ids[idx], assigned_to=db.user["id"],
+                            example=True)
     return count

@@ -76,8 +76,8 @@ steps, each of which can be accepted as it stands:
 4. **Who will use it?** Just me (opens straight away; a password is optional)
    or me and other people (everyone signs in). Optionally encrypt the file.
 5. **Name it and choose where to keep it.** With a tick box for a few example
-   records, which **Setup > Remove the example records** takes away again in
-   one go.
+   records, which **Setup > Remove the example records** (administrators)
+   takes away again in one go - except any you have added a note, file or task to.
 
 Going back and forth, or switching theme, never loses what
 you have typed.
@@ -103,7 +103,9 @@ one column per stage with counts and money totals. Drag a card to move it on
 **Records.** The form on the left; on the right **Notes** (note, call, email,
 meeting), **Tasks** with due dates, **Files** kept inside the CRM file,
 **Related** records from other lists with a *+ New* that links back
-automatically, and the full **History** of every change.
+automatically, and the full **History** of every change. A note, task or
+file can be deleted only by whoever added it, or an administrator. Opening an
+attached program or script asks first.
 
 **Wrong information cannot be saved.** Dates get their slashes as you type
 (13112026 becomes 13/11/2026; `today`, `tomorrow` and `+7` work too) and must
@@ -129,8 +131,9 @@ and which rows have problems (and saves those rows to a file to fix), can
 update existing records instead of duplicating them, creates linked records
 that do not exist yet, and is all-or-nothing. Any list exports to Excel or
 CSV; **Tools > Export everything to Excel** writes the lot - a sheet per
-list, plus notes and tasks - so you are never locked in. Each record has a
-printable record sheet.
+list, plus notes and tasks - so you are never locked in (attached files and
+the history of changes are not in it: save files from the record, export the
+history from its page). Each record has a printable record sheet.
 
 **Keyboard.** Ctrl/Cmd+K search, +N new record, +S save, +D next theme (Phosphor / Dark / Light), +L
 lock, Alt+Left back, Esc close. Tab always moves to the next box, including
@@ -185,7 +188,8 @@ the wizard warns if the folder looks synced.
 - A copy is made automatically the first time the CRM is opened each day, in
   a `<name> backups` folder beside the file; the newest 14 are kept.
   **File > Back up now** makes one wherever you choose. To go back to a
-  backup, open it with File > Open.
+  backup, open it with File > Open (no backups are made of a backup opened
+  that way).
 - Deleted records go to **Tools > Recycle bin** and can be restored. Only an
   administrator can delete for good.
 - **Tools > History of changes** is the audit trail: who changed what, from
@@ -205,13 +209,17 @@ the wizard warns if the folder looks synced.
   the backups copy both. A **recovery code** is shown once when the CRM is
   created - it is the only way back in if a password is forgotten.
   Settings can make a new one.
+- In an encrypted team CRM, everyone who can sign in holds the key to the whole
+  file. Roles (administrator, editor, read only) are enforced by the app, not
+  by the encryption.
 - Switching someone's account off removes their copy of the key. It does not
   re-encrypt the file with a new key, so an *old copy* of the file and its
   `.keys` file (a backup they took away, say) would still open with their old
   password. Treat old backups accordingly.
 - Deleting a record for good removes it and its notes, tasks and files. The
   history keeps a line saying that it was erased, including its name, and
-  earlier history lines about it remain.
+  earlier history lines about it remain. Records that linked to it lose the
+  link, with a line in their own history.
 
 ## Where things are kept
 
@@ -241,6 +249,7 @@ crmbuilder/
   theme.py         the house theme - Phosphor purple, Dark, Light (shared with the other apps, unmodified)
   ui/
     app.py         the window: sidebar, menus, navigation, lock, picking up other people's changes
+    base.py        the Page class every page is built on
     styles.py      extra styles on top of theme.py (tick boxes, sidebar, headings)
     widgets.py     scrolling frames, dialogs, field editors, the generated form
     welcome.py     welcome, sign-in, lock screen, recovery code

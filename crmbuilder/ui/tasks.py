@@ -380,7 +380,9 @@ def edit_task_dialog(app, task: dict):
 
     d.save_btn = d.add_button("Save task", save, accent=True)
     d.add_button("Cancel", d.cancel)
-    d.delete_btn = d.add_button("Delete", delete, side="left", style="Danger.TButton")
+    d.delete_btn = None
+    if db.may_remove(task.get("created_by")):
+        d.delete_btn = d.add_button("Delete", delete, side="left", style="Danger.TButton")
     d.default_on_enter()
     entry.icursor("end")
     return d.show(focus=entry)

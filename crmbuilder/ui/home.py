@@ -320,7 +320,7 @@ class HomePage(Page):
                           "text": "Add the people who will use it" if db.mode == "team"
                           else "Share it with colleagues",
                           "done": len(db.users()) > 1, "go": lambda: app.go("people")})
-        if db.can_edit and db.has_examples():
+        if db.is_admin and db.has_examples():
             steps.append({"key": "examples",
                           "text": "Remove the example records when you have seen enough",
                           "done": False, "go": app.remove_examples})

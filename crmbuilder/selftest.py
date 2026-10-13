@@ -436,6 +436,16 @@ def _template(step, tpl: dict, tmp: str, opened: list):
     else:
         raise AssertionError("backing up over the live file was allowed")
 
+    step("remove the examples")
+    kept = db.conn.execute("SELECT id FROM records WHERE example=1 ORDER BY id LIMIT 1").fetchone()
+    need(kept is not None, "no example records are left to remove")
+    db.add_note(kept[0], "This one is mine now")
+    db.remove_examples()
+    need(not db.has_examples(), "example records were left behind")
+    need(db.get_record(kept[0]) is not None and db.notes(kept[0]),
+         "an example record someone had written a note on was erased")
+    need(db.get_record(rid) is not None, "removing the examples erased a record that was not one")
+
     step("close and reopen")
     want = db.get_record(rid)["data"]
     want_counts = db.counts()
@@ -514,6 +524,14 @@ def _users(step, tmp: str, opened: list):
     need(_refused(db.add_user, "ed", "Another Ed", "viewer", EDITOR_PW), "a username was used twice")
     need(len(db.users()) == 3, "the people list is wrong")
     rid = db.create_record("person", {"first_name": "Pat", "last_name": "Example"})
+    ot = bpm.get_type(db.blueprint, "organisation")
+    org = db.create_record("organisation", {ot["title"][0]: "Linked Ltd"})
+    db.update_record(rid, {"organisation": org})
+    tid = db.add_task("Alex's task", record_id=rid)
+    attached = os.path.join(tmp, "team-file.txt")
+    with open(attached, "w", encoding="utf-8") as fh:
+        fh.write("team file")
+    fid = db.add_file(rid, attached)
     db.close()
 
     step("sign in is needed")
@@ -551,6 +569,12 @@ def _users(step, tmp: str, opened: list):
     need(_refused(db.set_password, db.user["id"], "Another-pass-17", "not-my-password"),
          "a password was changed without the old one")
     need(db.history(rid)[0]["user_name"] == "Ed Editor", "the history does not say who made a change")
+    need(_refused(db.delete_task, tid), "an editor deleted someone else's task")
+    need(_refused(db.delete_file, fid), "an editor removed someone else's file")
+    need(_refused(db.remove_examples), "an editor removed the example records")
+    own = db.add_task("Ed's task", record_id=rid)
+    db.delete_task(own)
+    need(not any(x["id"] == own for x in db.tasks(rid)), "an editor could not delete their own task")
 
     step("administrator account")
     db.login("alex", ADMIN_PW)
@@ -566,6 +590,17 @@ def _users(step, tmp: str, opened: list):
         raise AssertionError("a switched-off account could still sign in")
     db.login("alex", ADMIN_PW)
     need(db.purge_records([mine]) == 1 and db.get_record(mine) is None, "erasing for good did not work")
+
+    step("after erasing for good")
+    fresh = db.create_record("person", {"first_name": "Fresh"})
+    need(fresh > mine, "an erased record's number was given to a new record")
+    need([h["action"] for h in db.history(fresh)] == ["created"],
+         "a new record shows an erased record's history")
+    need(db.purge_records([org]) == 1, "the organisation was not erased")
+    need("organisation" not in db.get_record(rid)["data"], "a link to an erased record was kept")
+    last = db.history(rid)[0]
+    need(last["action"] == "changed" and last["old"] == "Linked Ltd",
+         "the record that linked to an erased one has no line in its history")
     db.close()
     return f"3 accounts, {step.count} steps"
 
@@ -746,10 +781,12 @@ def _csv_import(step, tmp: str, opened: list):
     path2 = os.path.join(tmp, "update.tsv")
     with open(path2, "w", encoding="utf-8", newline="") as fh:
         fh.write("Forename\tE-mail\tMobile phone\nAnn\tann@example.co.uk\t07700 900999\n"
-                 "Dee\tdee@example.org\t\n")
+                 "Dee\tdee@example.org\t\n'=Eve\teve@example.org\t\n")
     _mapping, _prepared, report = _import_file(db, path2, options={"match_field": "email"})
-    need(report["updated"] == 1 and report["added"] == 1, f"the second import reported {report}")
-    need(db.count("person") == 3, "the update made a duplicate")
+    need(report["updated"] == 1 and report["added"] == 2, f"the second import reported {report}")
+    need(db.count("person") == 4, "the update made a duplicate")
+    need(any(r["data"]["first_name"] == "=Eve" for r in db.records("person")),
+         "the ' an export puts before a formula-like value was not taken off")
     need(db.get_record(people["Ann"]["id"])["data"]["mobile"] == "07700 900999",
          "the matching record was not updated")
     return "4 rows read, 2 added, 1 bad row skipped, links and options created, update by email"

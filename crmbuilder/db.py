@@ -517,6 +517,11 @@ class Database:
     def is_admin(self) -> bool:
         return bool(self.user) and self.user["role"] == "admin"
 
+    def may_remove(self, owner) -> bool:
+        """Notes, tasks and files are deleted for good: only by the person who
+        added them, or an administrator."""
+        return self.can_edit and (owner == self.user["id"] or self.is_admin)
+
     @property
     def has_password(self) -> bool:
         row = self.conn.execute("SELECT pw FROM users WHERE id=?", (self.user["id"],)).fetchone()
@@ -755,6 +760,9 @@ class Database:
         with self.tx():
             self.conn.execute("UPDATE users SET name=?, role=?, active=? WHERE id=?",
                               ((name or "").strip() or row["name"], new_role, new_active, uid))
+            if ((name or "").strip() or row["name"]) != row["name"]:
+                self._users = None
+                self._retitle(self._showing_user(uid))     # (the name is in their search text)
             if unlock:
                 self.conn.execute("UPDATE users SET failed=0, locked_until=NULL WHERE id=?", (uid,))
             self._audit("user-changed", None, "", "",
@@ -768,6 +776,20 @@ class Database:
         self._users = None
         if uid == self.user["id"]:
             self._load_user(row["username"])
+
+    def _showing_user(self, uid: int) -> list[int]:
+        """Records with this person in one of their 'team member' fields."""
+        out = []
+        for t in self.blueprint.get("types") or []:
+            keys = [f["key"] for f in t.get("fields", []) if f.get("kind") == "user"]
+            if not keys:
+                continue
+            for r in self.conn.execute("SELECT id, data FROM records WHERE type=?",
+                                       (t["key"],)).fetchall():
+                data = json.loads(r["data"] or "{}")
+                if any(data.get(k) == uid for k in keys):
+                    out.append(r["id"])
+        return out
 
     def enable_user(self, uid: int, new_password: str) -> None:
         """Switch a switched-off account back on, with a new password (in an
@@ -861,6 +883,12 @@ class Database:
         if record_id is not None:
             where.append("record_id=?")
             args.append(record_id)
+            # (an older file may have handed an erased record's number on to a
+            # new one: its history is told apart by the reference)
+            row = self.conn.execute("SELECT ref FROM records WHERE id=?", (record_id,)).fetchone()
+            if row is not None:
+                where.append("ref=?")
+                args.append(row["ref"])
         if search:
             fn = "lower" if search.isascii() else "ulower"
             where.append("(" + " OR ".join(
@@ -1000,10 +1028,14 @@ class Database:
                 errors[f["key"]] = err
             elif value is not None:
                 if f["kind"] == "link":
-                    target = self.conn.execute("SELECT type FROM records WHERE id=?",
+                    target = self.conn.execute("SELECT type, deleted_at FROM records WHERE id=?",
                                                (value,)).fetchone()
                     if target is None or target["type"] != f.get("link_type"):
                         errors[f["key"]] = "That record no longer exists."
+                        continue
+                    if target["deleted_at"] and not (base is not None
+                                                     and base.get(f["key"]) == value):
+                        errors[f["key"]] = "That record is in the recycle bin."
                         continue
                 data[f["key"]] = value
         return data, errors
@@ -1057,9 +1089,14 @@ class Database:
         for f in t.get("fields", []):
             v = values.get(f["key"])
             if f["kind"] == "link" and isinstance(v, int) and not isinstance(v, bool):
-                if self.conn.execute("SELECT 1 FROM records WHERE id=?", (v,)).fetchone() is None:
+                row = self.conn.execute("SELECT deleted_at FROM records WHERE id=?",
+                                        (v,)).fetchone()
+                if row is None:
                     raise DBError(f"The record chosen for “{f['name']}” no longer exists - "
                                   "someone else has erased it. Choose another and save again.")
+                if row["deleted_at"]:
+                    raise DBError(f"The record chosen for “{f['name']}” is in the recycle bin. "
+                                  "Restore it first, or choose another and save again.")
 
     def _set_links(self, rid: int, t: dict, data: dict):
         self.conn.execute("DELETE FROM links WHERE src=?", (rid,))
@@ -1067,8 +1104,10 @@ class Database:
             if f["kind"] == "link" and isinstance(data.get(f["key"]), int):
                 self.conn.execute("INSERT INTO links VALUES(?,?,?)", (rid, f["key"], data[f["key"]]))
 
-    def create_record(self, type_key: str, data: dict, example: bool = False) -> int:
-        """Store a new record. data must already be validated."""
+    def create_record(self, type_key: str, data: dict, example: bool = False,
+                      check_unique: bool = True) -> int:
+        """Store a new record. data must already be validated. (An import checks
+        'must be different' values itself, for all its rows at once.)"""
         self._need_edit()
         t = bpm.get_type(self.blueprint, type_key)
         if t is None:
@@ -1077,23 +1116,50 @@ class Database:
         now = validate.now_stamp()
         with self.tx():
             self._check_links(t, data)
+            if check_unique:
+                self._check_unique(t, data)
             seq = int(self.get_meta("seq:" + type_key, "0")) + 1
             self.set_meta("seq:" + type_key, seq)
             ref = f"{t['prefix']}-{seq:04d}"
             title = bpm.title_for(t, data, self.lookup) or ref
-            cur = self.conn.execute(
-                "INSERT INTO records(type,seq,ref,title,data,search,example,created_at,created_by,"
-                "updated_at,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (type_key, seq, ref, title, json.dumps(data),
+            rid = self._next_record_id()
+            self.conn.execute(
+                "INSERT INTO records(id,type,seq,ref,title,data,search,example,created_at,"
+                "created_by,updated_at,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (rid, type_key, seq, ref, title, json.dumps(data),
                  self._search_text(t, ref, title, data), int(example), now, self.user["id"],
                  now, self.user["id"]))
-            rid = cur.lastrowid
             self._set_links(rid, t, data)
             self._audit("created", {"id": rid, "type": type_key, "ref": ref}, "", "", title)
         return rid
 
+    def _next_record_id(self) -> int:
+        """Inside the transaction that adds a record: a number no record has ever
+        had. (SQLite would hand an erased record's number to the next new one,
+        and its history, or a colleague's save of it, would land on that.)"""
+        mark = self.get_meta("next_record_id", "0")
+        top = self.conn.execute("SELECT max(id) FROM records").fetchone()[0] or 0
+        # (files made before the mark was kept: the history remembers erased numbers)
+        told = self.conn.execute("SELECT max(record_id) FROM audit").fetchone()[0] or 0
+        rid = max(int(mark) if str(mark).isdigit() else 0, top + 1, told + 1)
+        self.set_meta("next_record_id", rid + 1)
+        return rid
+
+    def _check_unique(self, t: dict, values: dict, exclude_id: int | None = None) -> None:
+        """Inside the transaction that stores them: no other record may have
+        taken a 'must be different' value since the form was checked."""
+        keys = [f["key"] for f in bpm.active_fields(t)
+                if f.get("unique") and values.get(f["key"]) not in (None, "", [])]
+        if not keys:
+            return
+        clash = self.unique_clashes(t["key"], {k: values[k] for k in keys}, exclude_id)
+        if clash:
+            f, r = clash[0]
+            raise DBError(f"{r['title']} ({r['ref']}) already has this. {f['name']} must be "
+                          f"different for every {t['name'].lower()}.")
+
     def update_record(self, rid: int, changes: dict, base: dict | None = None,
-                      force: bool = False) -> dict:
+                      force: bool = False, check_unique: bool = True) -> dict:
         """Apply changes ({field key: validated value, or None to clear}).
 
         base is the data the person started from. If someone else has since
@@ -1130,6 +1196,8 @@ class Database:
             if not changed:
                 return cur
             self._check_links(t, {f["key"]: new for f, _old, new in changed})
+            if check_unique:
+                self._check_unique(t, {f["key"]: new for f, _old, new in changed}, rid)
             title = bpm.title_for(t, data, self.lookup) or cur["ref"]
             now = validate.now_stamp()
             # (example=0: once someone has changed an example record it is theirs,
@@ -1214,6 +1282,8 @@ class Database:
 
     def _purge(self, ids) -> int:
         n = 0
+        ids = list(ids)
+        going = set(ids)
         with self.tx():
             for rid in ids:
                 r = self.get_record(rid)
@@ -1225,13 +1295,26 @@ class Database:
                 # records that pointed at this one lose the link - and its name,
                 # which must not live on in their titles and search text
                 pointed = []
+                now = validate.now_stamp()
                 for row in self.conn.execute("SELECT src, field FROM links WHERE dst=?",
                                              (rid,)).fetchall():
                     other = self.get_record(row["src"])
                     if other:
                         other["data"].pop(row["field"], None)
-                        self.conn.execute("UPDATE records SET data=? WHERE id=?",
-                                          (json.dumps(other["data"]), other["id"]))
+                        if other["id"] in going:        # (being erased too)
+                            self.conn.execute("UPDATE records SET data=? WHERE id=?",
+                                              (json.dumps(other["data"]), other["id"]))
+                        else:
+                            # the change is theirs to see: in their history, and as
+                            # a save (an open copy of the record then says so)
+                            self.conn.execute(
+                                "UPDATE records SET data=?, updated_at=?, updated_by=? WHERE id=?",
+                                (json.dumps(other["data"]), now,
+                                 self.user["id"] if self.user else None, other["id"]))
+                            ot = bpm.get_type(self.blueprint, other["type"])
+                            f = bpm.get_field(ot, row["field"]) if ot else None
+                            self._audit("changed", other, f["name"] if f else row["field"],
+                                        r["title"], "")
                         pointed.append(other["id"])
                 self.conn.execute("DELETE FROM links WHERE dst=?", (rid,))
                 self.conn.execute("DELETE FROM records WHERE id=?", (rid,))
@@ -1251,9 +1334,25 @@ class Database:
         return bool(self.conn.execute("SELECT 1 FROM records WHERE example=1 LIMIT 1").fetchone())
 
     def remove_examples(self) -> int:
-        """Erase the example records the setup wizard added."""
-        self._need_edit()
-        ids = [r[0] for r in self.conn.execute("SELECT id FROM records WHERE example=1")]
+        """Erase the example records the setup wizard added. Administrators only
+        (it erases for good). An example someone has since added a note, file or
+        task of their own to is kept: it is theirs now."""
+        self._need_admin()
+        from . import templates
+        theirs = {t[2] for tasks in templates.SAMPLE_TASKS.values() for t in tasks}
+        ids = []
+        for (rid,) in self.conn.execute("SELECT id FROM records WHERE example=1").fetchall():
+            used = self.conn.execute(
+                "SELECT 1 FROM notes WHERE record_id=? UNION ALL "
+                "SELECT 1 FROM files WHERE record_id=? LIMIT 1", (rid, rid)).fetchone()
+            if not used:
+                used = any(r[0] not in theirs for r in self.conn.execute(
+                    "SELECT title FROM tasks WHERE record_id=?", (rid,)))
+            if used:
+                with self.tx():
+                    self.conn.execute("UPDATE records SET example=0 WHERE id=?", (rid,))
+            else:
+                ids.append(rid)
         return self._purge(ids)
 
     def related(self, rid: int) -> list[tuple[dict, dict, list[dict]]]:
@@ -1309,7 +1408,9 @@ class Database:
                 (record_id, kind if kind in NOTE_KINDS else "Note", body, at or now, now,
                  self.user["id"]))
             self._audit("note-added", rec, kind, "", body[:200])
-            self.conn.execute("UPDATE records SET updated_at=? WHERE id=?",
+            # (example=0: a record someone has written on is no longer just an
+            # example, and "remove the example records" must not erase it)
+            self.conn.execute("UPDATE records SET updated_at=?, example=0 WHERE id=?",
                               (now, record_id))
         return cur.lastrowid
 
@@ -1319,6 +1420,8 @@ class Database:
         rec = self.get_record(record_id)
         if rec is None:
             raise DBError("This record no longer exists.")
+        if rec["deleted_at"]:
+            raise DBError("This record is in the recycle bin. Restore it first.")
         return rec
 
     def update_note(self, note_id: int, body: str) -> None:
@@ -1369,7 +1472,7 @@ class Database:
         return [dict(r) for r in self.conn.execute(sql, args)]
 
     def add_task(self, title: str, due: str | None = None, record_id: int | None = None,
-                 assigned_to: int | None = None, detail: str = "") -> int:
+                 assigned_to: int | None = None, detail: str = "", example: bool = False) -> int:
         self._need_edit()
         title = title.strip()
         if not title:
@@ -1383,6 +1486,8 @@ class Database:
                  validate.now_stamp(), self.user["id"]))
             if rec:
                 self._audit("task-added", rec, "", "", title)
+                if not example:     # (as for notes)
+                    self.conn.execute("UPDATE records SET example=0 WHERE id=?", (record_id,))
         return cur.lastrowid
 
     def update_task(self, task_id: int, **fields) -> None:
@@ -1412,9 +1517,12 @@ class Database:
 
     def delete_task(self, task_id: int) -> None:
         self._need_edit()
-        row = self.conn.execute("SELECT record_id, title FROM tasks WHERE id=?", (task_id,)).fetchone()
+        row = self.conn.execute("SELECT record_id, title, created_by FROM tasks WHERE id=?",
+                                (task_id,)).fetchone()
         if row is None:
             return
+        if not self.may_remove(row["created_by"]):
+            raise DBError("Only the person who added a task (or an administrator) can delete it.")
         with self.tx():
             self.conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
             rec = self.get_record(row["record_id"]) if row["record_id"] else None
@@ -1444,6 +1552,8 @@ class Database:
                 "INSERT INTO files(record_id,name,size,data,added_at,added_by) VALUES(?,?,?,?,?,?)",
                 (record_id, name, len(blob), blob, validate.now_stamp(), self.user["id"]))
             self._audit("file-added", rec, "", "", name)
+            # (as for notes)
+            self.conn.execute("UPDATE records SET example=0 WHERE id=?", (record_id,))
         return cur.lastrowid
 
     def file_data(self, file_id: int) -> tuple[str, bytes] | None:
@@ -1452,9 +1562,12 @@ class Database:
 
     def delete_file(self, file_id: int) -> None:
         self._need_edit()
-        row = self.conn.execute("SELECT record_id, name FROM files WHERE id=?", (file_id,)).fetchone()
+        row = self.conn.execute("SELECT record_id, name, added_by FROM files WHERE id=?",
+                                (file_id,)).fetchone()
         if row is None:
             return
+        if not self.may_remove(row["added_by"]):
+            raise DBError("Only the person who added a file (or an administrator) can remove it.")
         with self.tx():
             self.conn.execute("DELETE FROM files WHERE id=?", (file_id,))
             self._audit("file-removed", self.get_record(row["record_id"]), "", row["name"])
@@ -1510,7 +1623,8 @@ class Database:
             else:
                 out = sqlite3.connect(tmp)
                 try:
-                    self.conn.backup(out)
+                    # a few pages at a time, so that other people can still save meanwhile
+                    self.conn.backup(out, pages=256, sleep=0.05)
                 finally:
                     out.close()
             # the key file first: a copy without it could never be opened
@@ -1535,6 +1649,8 @@ class Database:
     def daily_backup(self) -> str | None:
         """One automatic copy per day, keeping the newest few. Never raises."""
         try:
+            if os.path.basename(os.path.dirname(self.path)).endswith(" backups"):
+                return None         # (a backup opened to look at: no backups of backups)
             folder = self.backup_dir()
             base, ext = os.path.splitext(os.path.basename(self.path))
             dest = os.path.join(folder, f"{base} {today_iso()}{ext}")

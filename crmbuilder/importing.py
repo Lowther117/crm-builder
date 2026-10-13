@@ -157,14 +157,17 @@ def prepare(db, type_key: str, rows: list[list[str]], mapping: dict, options: di
         left_empty = []
         for _i, f in cols:
             text = str(raw.get(f["key"], "")).strip()
+            if text[:1] == "'" and text[1:2] in ("=", "+", "-", "@"):
+                text = text[1:]     # (put there by an export, to stop it being run as a formula)
             if not text and f.get("required"):
                 left_empty.append(f)        # decided below, once we know if the row updates
                 continue
             field = f
             if f["kind"] in ("choice", "tags") and text and opts["add_options"]:
                 known = [o.lower() for o in validate.options_of(f)]
-                parts = [text] if f["kind"] == "choice" else \
-                    [p.strip() for p in re.split(r"[;,|\n]", text) if p.strip()]
+                # (a tag may itself contain a comma: "Yes, please")
+                parts = [text] if f["kind"] == "choice" or validate._match_option(f, text) \
+                    else [p.strip() for p in re.split(r"[;,|\n]", text) if p.strip()]
                 for p in parts:
                     if p.lower() not in known and len(p) <= 60:
                         row_options.setdefault(f["key"], []).append(p)
@@ -331,6 +334,7 @@ def run(db, type_key: str, prepared: dict, options: dict | None = None, progress
                     report["links_created"] += 1
                 made[(key, name.lower())] = found
         rows = prepared["rows"]
+        _check_unique_again(db, t, rows)
         for i, row in enumerate(rows):
             if progress and i % 100 == 0:
                 progress(i, len(rows))
@@ -344,16 +348,36 @@ def run(db, type_key: str, prepared: dict, options: dict | None = None, progress
                 if rid:
                     data[key] = rid
             if row["action"] == "update" and row["existing"]:
-                db.update_record(row["existing"], data)
+                db.update_record(row["existing"], data, check_unique=False)
                 report["updated"] += 1
             else:
-                db.create_record(type_key, data)
+                db.create_record(type_key, data, check_unique=False)
                 report["added"] += 1
         if progress:
             progress(len(rows), len(rows))
         if report["added"] or report["updated"]:
             db.set_meta("has_imported", "1")
     return report
+
+
+def _check_unique_again(db, t: dict, rows: list[dict]) -> None:
+    """Inside the import's transaction: 'must be different' values were checked
+    when the rows were prepared, but someone else may have saved one since."""
+    for f in [f for f in bpm.active_fields(t) if f.get("unique")]:
+        held = {}
+        for r in db.records(t["key"]):
+            v = r["data"].get(f["key"])
+            if v not in (None, "", []):
+                held.setdefault(str(v).strip().lower(), r)
+        for row in rows:
+            v = row["data"].get(f["key"]) if row["action"] in ("add", "update") else None
+            hit = held.get(str(v).strip().lower()) if v not in (None, "", []) else None
+            if hit is not None and hit["id"] != (row["existing"] if row["action"] == "update"
+                                                 else None):
+                raise dbm.DBError(f"Row {row['n']}: {hit['title']} ({hit['ref']}) has just been "
+                                  f"saved with the same {f['name']}, which must be different on "
+                                  "every record, so nothing was imported. Check the file "
+                                  "again, then import.")
 
 
 def type_from_sheet(name: str, headers: list[str], rows: list[list[str]], bp: dict) -> tuple[dict, dict]:

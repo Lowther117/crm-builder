@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
+import tempfile
+import time
 
 SETTINGS_NAME = "crm-builder-settings.json"
 
@@ -115,3 +118,36 @@ def looks_synced(path: str) -> bool:
     file gets corrupted or forked into conflict copies."""
     low = os.path.abspath(path).lower()
     return any(m in low for m in SYNC_MARKERS)
+
+
+OPEN_PREFIX = "crm-builder-open-"
+_opened: list[str] = []
+
+
+def open_copy_dir() -> str:
+    """A new temporary folder for a copy of an attached file to open (it may
+    have come out of an encrypted CRM: these are removed again, see below)."""
+    folder = tempfile.mkdtemp(prefix=OPEN_PREFIX)
+    _opened.append(folder)
+    return folder
+
+
+def clean_open_copies(stale_hours: float | None = None) -> None:
+    """Remove the copies of attached files made for opening. With stale_hours:
+    any left behind by an earlier run (older than that, so that another copy
+    of the app still running keeps its own); otherwise this run's. A copy
+    still open in another program on Windows cannot be removed yet: it is
+    tried again next time."""
+    if stale_hours is None:
+        folders, _opened[:] = list(_opened), []
+    else:
+        try:
+            base = tempfile.gettempdir()
+            cutoff = time.time() - stale_hours * 3600
+            folders = [os.path.join(base, n) for n in os.listdir(base)
+                       if n.startswith(OPEN_PREFIX)
+                       and os.path.getmtime(os.path.join(base, n)) < cutoff]
+        except OSError:
+            return
+    for folder in folders:
+        shutil.rmtree(folder, ignore_errors=True)
