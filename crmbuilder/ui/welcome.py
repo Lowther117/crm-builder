@@ -243,7 +243,7 @@ class LockOverlay(tk.Frame):
                 self.grab_release()
             except tk.TclError:
                 pass
-            app, path = self.app, self.app.db.path
+            app, path = self.app, self.app.db.shown_path
             self.destroy()
             app.unlocked()
             app.db.close()

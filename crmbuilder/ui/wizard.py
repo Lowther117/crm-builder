@@ -1275,7 +1275,7 @@ class WizardScreen(ttk.Frame):
         self.folder_label.pack(side="left", fill="x", expand=True)
         self.file_label = ttk.Label(left, text="", style="PanelHelp.TLabel", justify="left")
         self.file_label.pack(anchor="w", pady=(6, 0))
-        self.sync_label = ttk.Label(left, text="", style="PanelWarn.TLabel", justify="left")
+        self.sync_label = ttk.Label(left, text="", style="PanelHelp.TLabel", justify="left")
         self.examples_var = tk.BooleanVar(self, value=bool(d["examples"]))
         self.examples_tick = None
         if self._has_examples():
@@ -1349,9 +1349,10 @@ class WizardScreen(ttk.Frame):
             self.file_label.configure(style="PanelHelp.TLabel", text=f"It will be saved as “{name}”.")
         if paths.looks_synced(d["folder"]):
             self.sync_label.configure(
-                text="This looks like a folder that is synced to the cloud (OneDrive, Dropbox, "
-                     "iCloud and the like). Syncing can damage a CRM file while it is in use. "
-                     "A normal folder or a shared network drive is safer – but you can carry on.")
+                text="This looks like a folder that is synced to the cloud (OneDrive, SharePoint, "
+                     "Dropbox, iCloud and the like). That is fine: the app will work on a copy "
+                     "and merge everyone's changes into the shared file, so other people can "
+                     "open it from their own computers too.")
             self.sync_label.pack(anchor="w", pady=(8, 0), after=self.file_label)
         else:
             self.sync_label.pack_forget()

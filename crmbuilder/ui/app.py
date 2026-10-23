@@ -13,7 +13,7 @@ from tkinter import ttk
 from .. import APP_NAME, FILE_EXT, __version__, paths
 from .. import blueprint as bpm
 from .. import db as dbm
-from .. import theme
+from .. import sync, theme
 from . import styles, widgets
 from .styles import fs
 from .widgets import MOD, MOD_LABEL
@@ -33,6 +33,7 @@ PAGES = {
     "settings": ("admin", "SettingsPage"),
     "bin": ("admin", "BinPage"),
     "history": ("admin", "HistoryPage"),
+    "sync": ("syncpage", "SyncPage"),
 }
 # full-window screens used before a CRM is open
 SCREENS = {
@@ -69,6 +70,7 @@ class App:
         self._overlay = None             # the lock screen, while it is up
         self._file_lost = False
         self.search_entry = None
+        self._syncing = False
 
         root.title(APP_NAME)
         # The smallest window every page is laid out for is 980 x 620 at the
@@ -224,10 +226,60 @@ class App:
 
     def _tick(self):
         try:
+            self._sync_tick()
             self.check_external()
             self._check_idle()
         finally:
             self.root.after(5000, self._tick)
+
+    # ------------------------------------------------------- synced folder
+    def _synced(self) -> bool:
+        return bool(self.db is not None and getattr(self.db, "synced", False))
+
+    def _sync_tick(self):
+        """Every few seconds: let a synced-folder CRM pick up other people's
+        merges and send its own changes when they are due."""
+        if not self._synced() or self._locked or self._syncing or self.db.conn is None:
+            return
+        if self._grabbed() or self.testing:
+            return
+        page = self.page
+        if page is not None:
+            # (mid-edit on a record, the design or an import: nothing is
+            # swapped under them - the merge waits until they are done)
+            try:
+                busy = getattr(page, "_drafting", None) or getattr(page, "is_dirty", None)
+                busy = bool(busy()) if callable(busy) else self.page_name == "import"
+            except Exception:
+                busy = True
+            if busy:
+                return
+        self._syncing = True
+        try:
+            word = self.db.auto_sync()
+        finally:
+            self._syncing = False
+        if word:
+            self.synced_now()
+            if word != "refreshed":
+                self.toast(word, "good" if "clash" not in word else "bad")
+
+    def synced_now(self):
+        """The work copy was replaced by a merge: show what it holds now."""
+        self._data_version = None
+        self.refresh_sidebar()
+        self.check_external()
+
+    def _sync_before_closing(self):
+        """A last merge so that nothing waits in the queue overnight. Quick,
+        and never in the way of closing."""
+        if not self._synced() or self.db.conn is None:
+            return
+        try:
+            if self.db.store.pending_count():
+                self.db.sync_now()
+        except Exception:
+            pass
 
     def check_external(self):
         """Pick up changes other people have saved to the shared file."""
@@ -250,7 +302,7 @@ class App:
             was = self.db.user["role"]
             if not self.db.refresh_account():
                 # an administrator switched this account off while it was open
-                path = self.db.path
+                path = self.db.shown_path
                 self.db.close()
                 self.db = None
                 self.open_path(path)
@@ -281,7 +333,7 @@ class App:
             return
         self._file_lost = True
         widgets.error(self, "The CRM file cannot be reached",
-                      f"{self.db.path}\n\nIf it is on a shared or removable drive, check that "
+                      f"{self.db.shown_path}\n\nIf it is on a shared or removable drive, check that "
                       "the drive is still connected. Nothing can be saved until the file is "
                       "back. If it has been moved or renamed, close this CRM (File > Close "
                       "this CRM) and open it from where it is now.")
@@ -425,10 +477,17 @@ class App:
         self.screen.screen_name = name
         self.screen.pack(fill="both", expand=True)
 
+    def _open_file(self, path: str) -> dbm.Database:
+        """A Database for a file: through the synced-folder machinery when the
+        file sits in a synced folder (OneDrive, SharePoint, Dropbox...)."""
+        if sync.wants_sync(path) and not self.testing:
+            return sync.SyncDatabase.open_shared(path)
+        return dbm.Database.open(path)
+
     def open_path(self, path: str, quiet: bool = False) -> bool:
         """Open a CRM file, asking for a password if it has one."""
         try:
-            db = dbm.Database.open(path)
+            db = self._open_file(path)
         except dbm.DBError as exc:
             self.show_screen("welcome")
             if not quiet:
@@ -449,10 +508,19 @@ class App:
         if self.db is not None and self.db is not db:
             self.db.close()
             paths.clean_open_copies()
+        if (not self.testing and not getattr(db, "synced", False) and db.user
+                and sync.wants_sync(db.path)):
+            # made by the wizard in a synced folder: carry on the shared way
+            try:
+                db = sync.SyncDatabase.adopt(db)
+            except dbm.DBError as exc:
+                widgets.error(self, "Could not set up sharing",
+                              f"{exc}\n\nThe CRM is open directly instead. Do not open it on "
+                              "another computer until this is sorted out.")
         self.db = db
         self.history = []
         if not self.testing:
-            paths.remember_recent(self.settings, db.path)
+            paths.remember_recent(self.settings, db.shown_path)
             # once the window is up (a big CRM on a network drive takes a while to copy)
             self.root.after(1500, lambda: self.db is db and db.conn is not None
                             and db.daily_backup())
@@ -460,12 +528,15 @@ class App:
         self._last_activity = time.time()
         self._build_shell()
         self._go("home", {"first_time": first_time} if first_time else {}, push=False, check=False)
+        if getattr(db, "synced", False) and not self.testing:
+            self.root.after(600, lambda: self.db is db and self._sync_tick())
 
     def close_db(self):
         if self._locked:
             return
         if self.page is not None and not self.page.can_leave():
             return
+        self._sync_before_closing()
         if self.db is not None:
             self.db.close()
         self.db = None
@@ -503,6 +574,8 @@ class App:
             self.save_settings()
         except tk.TclError:
             pass
+        if not self._locked:
+            self._sync_before_closing()
         if self.db is not None:
             self.db.close()
         paths.clean_open_copies()
@@ -601,6 +674,9 @@ class App:
             ttk.Label(side, text="No lists yet.", style="SideHelp.TLabel").pack(anchor="w", padx=20)
         ttk.Label(side, text="MORE", style="SideDim.TLabel").pack(anchor="w", padx=20, pady=(16, 4))
         self._nav(side, "reports", "Reports", lambda: self.go("reports"))
+        if self._synced():
+            waiting = db.store.pending_count() + db.conflict_count()
+            self._nav(side, "sync", "Sync", lambda: self.go("sync"), waiting if waiting else None)
         self._mark_nav()
 
     def _tasks_due(self) -> int:
@@ -640,6 +716,9 @@ class App:
             m.add_cascade(label="Open recent", menu=sub)
         m.add_separator()
         if open_db:
+            if self._synced():
+                m.add_command(label="Sync now", command=lambda: self.go("sync") and
+                              self.page.sync_now())
             m.add_command(label="Back up now…", command=lambda: self.tool("backup_now"))
             m.add_command(label="Close this CRM", command=self.close_db)
             if self.db.has_password:
@@ -673,6 +752,8 @@ class App:
             m.add_command(label="Check the data…", command=lambda: self.go("datacheck"))
             m.add_command(label="Recycle bin", command=lambda: self.go("bin"))
             m.add_command(label="History of changes", command=lambda: self.go("history"))
+            m.add_separator()
+            m.add_command(label="Sync (shared folder)…", command=lambda: self.go("sync"))
             bar.add_cascade(label="Tools", menu=m)
 
             m = styles.menu(bar, c)
@@ -708,10 +789,10 @@ class App:
                 initialdir=os.path.dirname(self.settings.get("last_db") or "") or None)
         if not path:
             return
-        if self.db is not None and os.path.abspath(path) == self.db.path:
+        if self.db is not None and os.path.abspath(path) in (self.db.path, self.db.shown_path):
             return
         try:
-            new = dbm.Database.open(path)
+            new = self._open_file(path)
         except dbm.DBError as exc:
             # whatever is open now stays open
             widgets.error(self, "Could not open that file", str(exc))
@@ -781,7 +862,8 @@ class App:
     def show_about(self):
         widgets.info(self, f"About {APP_NAME}",
                      f"{APP_NAME} {__version__}\n\nA CRM you design yourself. Everything is kept "
-                     "in one file on your own computer or shared drive; nothing is sent anywhere.")
+                     "in one file on your own computer, a shared drive or a synced folder; "
+                     "nothing is sent anywhere else.")
 
     # --------------------------------------------------------- navigation
     def go(self, name: str, **kw) -> bool:

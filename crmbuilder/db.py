@@ -57,7 +57,16 @@ CREATE TABLE IF NOT EXISTS audit(
 CREATE INDEX IF NOT EXISTS audit_record ON audit(record_id);
 CREATE TABLE IF NOT EXISTS views(
   id INTEGER PRIMARY KEY, type TEXT, name TEXT, spec TEXT, user_id INTEGER);
+CREATE TABLE IF NOT EXISTS sync_applied(opid TEXT PRIMARY KEY, at TEXT);
+CREATE TABLE IF NOT EXISTS sync_conflicts(
+  id INTEGER PRIMARY KEY, at TEXT, record_id INTEGER, type TEXT, ref TEXT, field TEXT,
+  mine TEXT, theirs TEXT, who TEXT, other TEXT, note TEXT, resolved INTEGER DEFAULT 0);
 """
+
+# Numbers below this are handed out one after another, as they always were.
+# A CRM shared through a synced folder (sync.py) gives each copy of the app a
+# space of its own above it, so that records made while apart never clash.
+LOW_IDS = 1 << 32
 
 
 class DBError(Exception):
@@ -66,6 +75,41 @@ class DBError(Exception):
 
 class LoginError(DBError):
     pass
+
+
+class Gone(DBError):
+    """The record (or note, task...) no longer exists at all."""
+
+
+class Binned(DBError):
+    """The record is in the recycle bin."""
+
+
+class UniqueClash(DBError):
+    """Another record already has a 'must be different' value."""
+
+
+class PasswordRef:
+    """A password that is already hashed - what a synced-folder queue carries
+    (the hash the file stores; the password itself only when the queue is
+    encrypted, which is when the key file needs it)."""
+
+    def __init__(self, hashed: str, plain: str | None = None):
+        self.hashed, self.plain = hashed, plain
+
+
+def _hash_pw(password) -> str:
+    return password.hashed if isinstance(password, PasswordRef) else security.hash_password(password)
+
+
+def _plain_pw(password) -> str | None:
+    return password.plain if isinstance(password, PasswordRef) else password
+
+
+def _pw_problem(password, username: str = "") -> str | None:
+    if isinstance(password, PasswordRef):
+        return None
+    return security.password_problem(password, username)
 
 
 class Conflict(DBError):
@@ -150,6 +194,21 @@ class Database:
         self._seen_version = None       # data_version the two caches above were filled at
         self._keys_before = None        # (key file as it was,) while a change to it is open
         self._bp_stamp = None
+        self._now_override = None       # replaying someone's queued change: its own time
+
+    @property
+    def shown_path(self) -> str:
+        """The file as the person knows it (a synced-folder CRM works on a copy)."""
+        return self.path
+
+    def _now(self) -> str:
+        return self._now_override or validate.now_stamp()
+
+    def _on_rollback(self) -> None:
+        """A write transaction was abandoned (for a subclass to act on)."""
+
+    def _on_commit(self) -> None:
+        """An outermost write transaction reached the file (for a subclass)."""
 
     # ------------------------------------------------------------ opening
     @classmethod
@@ -181,7 +240,7 @@ class Database:
                 db.keyfile = kf
             db._connect()
             db.conn.executescript(SCHEMA)
-            now = validate.now_stamp()
+            now = db._now()
             with db.tx():
                 for k, v in (("schema", str(SCHEMA_VERSION)), ("mode", mode),
                              ("created_at", now), ("idle_minutes", "15")):
@@ -303,6 +362,7 @@ class Database:
             yield
             self.conn.execute("COMMIT")
             self._keys_before = None
+            self._on_commit()
         except BaseException as exc:
             # Never leave it open: an open transaction would take in every
             # later save and none of them would ever reach the file.
@@ -310,6 +370,7 @@ class Database:
                 self.conn.execute("ROLLBACK")
             self._forget()
             self._restore_keys()
+            self._on_rollback()
             if isinstance(exc, _db_errors()):
                 raise DBError(self._explain(exc)) from exc
             raise
@@ -379,7 +440,7 @@ class Database:
         self.keyfile = security.KeyFile.load(self.path) or self.keyfile
         kf = self.keyfile
         self.mode = kf.mode
-        now = validate.now_stamp()
+        now = self._now()
         if kf.locked(username, now):
             raise LoginError(f"Too many wrong passwords. This account is locked for "
                              f"{LOCK_MINUTES} minutes; an administrator can unlock it sooner.")
@@ -435,7 +496,7 @@ class Database:
                    else "That password is not right.")
         if row is None or not row["active"]:
             raise LoginError(generic)
-        now = validate.now_stamp()
+        now = self._now()
         if row["locked_until"] and row["locked_until"] > now:
             raise LoginError(f"Too many wrong passwords. This account is locked for "
                              f"{LOCK_MINUTES} minutes; an administrator can unlock it sooner.")
@@ -476,15 +537,17 @@ class Database:
             row = self._user_row(username)
             if row is None:
                 raise LoginError("There is no account with that username.")
-            problem = security.password_problem(new_password, row["username"])
+            problem = _pw_problem(new_password, row["username"])
             if problem:
                 raise DBError(problem)
             with self.tx():
                 self.conn.execute("UPDATE users SET pw=?, failed=0, locked_until=NULL, active=1 "
-                                  "WHERE id=?", (security.hash_password(new_password), row["id"]))
+                                  "WHERE id=?", (_hash_pw(new_password), row["id"]))
                 self._audit("password-recovered", None, "", "", user=(row["id"], row["name"]),
                             new=row["name"])
-                self._edit_keys(lambda kf: kf.set_user(row["username"], new_password, key))
+                if _plain_pw(new_password) is not None:
+                    self._edit_keys(lambda kf: kf.set_user(row["username"], _plain_pw(new_password),
+                                                           key))
         except Exception:
             if opened_here:
                 self.close()
@@ -585,7 +648,7 @@ class Database:
                                   "nothing was saved. Try again.")
             self.set_meta("blueprint", json.dumps(bp))
             # (the random part tells apart two changes made in the same second)
-            self.set_meta("blueprint_at", validate.now_stamp() + "." + os.urandom(4).hex())
+            self.set_meta("blueprint_at", self._now() + "." + os.urandom(4).hex())
             self._audit("design", None, "", "", new=note)
             self.blueprint = bp
             self._bp_stamp = self.get_meta("blueprint_at")
@@ -699,18 +762,18 @@ class Database:
             os.replace(tmp, self.keyfile.path)
         self.keyfile = security.KeyFile.load(self.path) or self.keyfile
 
-    def add_user(self, username: str, name: str, role: str, password: str) -> int:
+    def add_user(self, username: str, name: str, role: str, password, uid: int | None = None) -> int:
         self._need_admin()
         username, name = username.strip(), name.strip()
         if not username or not name:
             raise DBError("Give a username and a name.")
         if role not in ROLES:
             raise DBError("Choose a role.")
-        problem = security.password_problem(password, username)
+        problem = _pw_problem(password, username)
         if problem:
             raise DBError(problem)
         if any(u["username"].lower() == username.lower() for u in self.users()):
-            raise DBError("That username is already taken.")
+            raise UniqueClash("That username is already taken.")
         if not self.has_password:
             # otherwise the first account could be signed in to with any password
             raise DBError("Set a password for yourself first. Once other people use "
@@ -718,9 +781,10 @@ class Database:
         was = self.mode
         try:
             with self.tx():
-                cur = self.conn.execute(
-                    "INSERT INTO users(username,name,role,pw,created_at) VALUES(?,?,?,?,?)",
-                    (username, name, role, security.hash_password(password), validate.now_stamp()))
+                uid = self._low_id("users") if uid is None else uid
+                self.conn.execute(
+                    "INSERT INTO users(id,username,name,role,pw,created_at) VALUES(?,?,?,?,?,?)",
+                    (uid, username, name, role, _hash_pw(password), self._now()))
                 self._audit("user-added", None, "", "", new=f"{name} ({ROLES[role]})")
                 if self.mode != "team":
                     self.mode = "team"
@@ -728,13 +792,22 @@ class Database:
 
                 def change(kf):
                     kf.data["mode"] = "team"
-                    kf.set_user(username, password, self._key)
+                    if _plain_pw(password) is not None:
+                        kf.set_user(username, _plain_pw(password), self._key)
                 self._edit_keys(change)
         except BaseException:
             self.mode = was
             raise
         self._users = None
-        return cur.lastrowid
+        return uid
+
+    def _low_id(self, table: str) -> int:
+        """Inside a transaction: the next number for a table whose numbers are
+        handed out one after another (ignoring the space above LOW_IDS that
+        synced-folder copies use for themselves)."""
+        top = self.conn.execute(f"SELECT max(id) FROM {table} WHERE id < ?",
+                                (LOW_IDS,)).fetchone()[0] or 0
+        return top + 1
 
     def update_user(self, uid: int, name: str | None = None, role: str | None = None,
                     active: bool | None = None, unlock: bool = False) -> None:
@@ -791,35 +864,38 @@ class Database:
                     out.append(r["id"])
         return out
 
-    def enable_user(self, uid: int, new_password: str) -> None:
+    def enable_user(self, uid: int, new_password) -> None:
         """Switch a switched-off account back on, with a new password (in an
         encrypted CRM their copy of the key has to be made again from one)."""
         self._need_admin()
         row = self.conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if row is None:
-            raise DBError("That account no longer exists.")
-        problem = security.password_problem(new_password, row["username"])
+            raise Gone("That account no longer exists.")
+        problem = _pw_problem(new_password, row["username"])
         if problem:
             raise DBError(problem)
         with self.tx():
             self.conn.execute("UPDATE users SET pw=?, active=1, failed=0, locked_until=NULL "
-                              "WHERE id=?", (security.hash_password(new_password), uid))
+                              "WHERE id=?", (_hash_pw(new_password), uid))
             self._audit("user-changed", None, "", "",
                         new=f"{row['name']} ({ROLES.get(row['role'], row['role'])}, "
                             "switched back on with a new password)")
-            self._edit_keys(lambda kf: kf.set_user(row["username"], new_password, self._key))
+            if _plain_pw(new_password) is not None:
+                self._edit_keys(lambda kf: kf.set_user(row["username"], _plain_pw(new_password),
+                                                       self._key))
         self._users = None
 
-    def set_password(self, uid: int, new_password: str, old_password: str | None = None) -> None:
+    def set_password(self, uid: int, new_password, old_password: str | None = None) -> None:
         """Change a password. Your own needs the old one; an administrator can
         set anyone's. An empty new password removes it (one-person CRMs only)."""
         row = self.conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
         if row is None:
-            raise DBError("That account no longer exists.")
+            raise Gone("That account no longer exists.")
         own = uid == self.user["id"]
         if not own:
             self._need_admin()
-        elif row["pw"] and not security.verify_password(old_password or "", row["pw"]):
+        elif (row["pw"] and not isinstance(new_password, PasswordRef)
+              and not security.verify_password(old_password or "", row["pw"])):
             raise DBError("Your current password is not right.")
         if not row["active"]:
             raise DBError("This account is switched off. Switch it back on to give it "
@@ -829,16 +905,17 @@ class Database:
                 raise DBError("A password is required here.")
             hashed = None
         else:
-            problem = security.password_problem(new_password, row["username"])
+            problem = _pw_problem(new_password, row["username"])
             if problem:
                 raise DBError(problem)
-            hashed = security.hash_password(new_password)
+            hashed = _hash_pw(new_password)
         with self.tx():
             self.conn.execute("UPDATE users SET pw=?, failed=0, locked_until=NULL WHERE id=?",
                               (hashed, uid))
             self._audit("password-changed", None, "", "", new=row["name"])
-            if new_password:
-                self._edit_keys(lambda kf: kf.set_user(row["username"], new_password, self._key))
+            if new_password and _plain_pw(new_password) is not None:
+                self._edit_keys(lambda kf: kf.set_user(row["username"], _plain_pw(new_password),
+                                                       self._key))
         self._users = None
 
     def new_recovery_code(self) -> str:
@@ -850,6 +927,22 @@ class Database:
             self._audit("recovery-code", None, "", "", new="New recovery code made")
             self._edit_keys(lambda kf: made.append(kf.set_recovery(self._key)))
         return made[0]
+
+    def set_key_slot(self, name: str, slot: dict) -> None:
+        """Put a wrapped copy of the key into the key file as it is (a synced-
+        folder copy passes on the recovery slot it made). Administrators only."""
+        self._need_admin()
+        if not self.keyfile or not isinstance(slot, dict):
+            return
+        with self.tx():
+            self._audit("recovery-code", None, "", "", new="New recovery code made")
+            self._edit_keys(lambda kf: kf.data["slots"].__setitem__(name, dict(slot)))
+
+    def resolve_sync_conflict(self, cid: int) -> None:
+        """Mark a clash from a synced-folder merge as dealt with."""
+        self._need_edit()
+        with self.tx():
+            self.conn.execute("UPDATE sync_conflicts SET resolved=1 WHERE id=?", (int(cid),))
 
     def set_idle_minutes(self, minutes: int) -> None:
         """Lock the app after this many minutes without use (0 = never).
@@ -871,7 +964,7 @@ class Database:
         self.conn.execute(
             "INSERT INTO audit(at,user_id,user_name,action,record_id,type,ref,field,old,new) "
             "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (validate.now_stamp(), uid, uname, action, rid,
+            (self._now(), uid, uname, action, rid,
              record["type"] if record else "", record["ref"] if record else "",
              field or "", "" if old is None else str(old)[:2000],
              "" if new is None else str(new)[:2000]))
@@ -1092,11 +1185,15 @@ class Database:
                 row = self.conn.execute("SELECT deleted_at FROM records WHERE id=?",
                                         (v,)).fetchone()
                 if row is None:
-                    raise DBError(f"The record chosen for “{f['name']}” no longer exists - "
-                                  "someone else has erased it. Choose another and save again.")
+                    exc = Gone(f"The record chosen for “{f['name']}” no longer exists - "
+                               "someone else has erased it. Choose another and save again.")
+                    exc.field, exc.target = f["key"], v
+                    raise exc
                 if row["deleted_at"]:
-                    raise DBError(f"The record chosen for “{f['name']}” is in the recycle bin. "
-                                  "Restore it first, or choose another and save again.")
+                    exc = Binned(f"The record chosen for “{f['name']}” is in the recycle bin. "
+                                 "Restore it first, or choose another and save again.")
+                    exc.field, exc.target = f["key"], v
+                    raise exc
 
     def _set_links(self, rid: int, t: dict, data: dict):
         self.conn.execute("DELETE FROM links WHERE src=?", (rid,))
@@ -1105,16 +1202,20 @@ class Database:
                 self.conn.execute("INSERT INTO links VALUES(?,?,?)", (rid, f["key"], data[f["key"]]))
 
     def create_record(self, type_key: str, data: dict, example: bool = False,
-                      check_unique: bool = True) -> int:
+                      check_unique: bool = True, rid: int | None = None) -> int:
         """Store a new record. data must already be validated. (An import checks
-        'must be different' values itself, for all its rows at once.)"""
+        'must be different' values itself, for all its rows at once.)
+        rid: the number to give it (a synced-folder copy brings its own)."""
         self._need_edit()
         t = bpm.get_type(self.blueprint, type_key)
         if t is None:
-            raise DBError("That list no longer exists.")
+            raise Gone("That list no longer exists.")
         data = {k: v for k, v in data.items() if v not in (None, "", [])}
-        now = validate.now_stamp()
+        now = self._now()
         with self.tx():
+            if rid is not None and self.conn.execute("SELECT 1 FROM records WHERE id=?",
+                                                     (rid,)).fetchone():
+                raise DBError("That record has already been added.")
             self._check_links(t, data)
             if check_unique:
                 self._check_unique(t, data)
@@ -1122,7 +1223,7 @@ class Database:
             self.set_meta("seq:" + type_key, seq)
             ref = f"{t['prefix']}-{seq:04d}"
             title = bpm.title_for(t, data, self.lookup) or ref
-            rid = self._next_record_id()
+            rid = self._next_record_id() if rid is None else rid
             self.conn.execute(
                 "INSERT INTO records(id,type,seq,ref,title,data,search,example,created_at,"
                 "created_by,updated_at,updated_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1138,9 +1239,11 @@ class Database:
         had. (SQLite would hand an erased record's number to the next new one,
         and its history, or a colleague's save of it, would land on that.)"""
         mark = self.get_meta("next_record_id", "0")
-        top = self.conn.execute("SELECT max(id) FROM records").fetchone()[0] or 0
+        top = self.conn.execute("SELECT max(id) FROM records WHERE id < ?",
+                                (LOW_IDS,)).fetchone()[0] or 0
         # (files made before the mark was kept: the history remembers erased numbers)
-        told = self.conn.execute("SELECT max(record_id) FROM audit").fetchone()[0] or 0
+        told = self.conn.execute("SELECT max(record_id) FROM audit WHERE record_id < ?",
+                                 (LOW_IDS,)).fetchone()[0] or 0
         rid = max(int(mark) if str(mark).isdigit() else 0, top + 1, told + 1)
         self.set_meta("next_record_id", rid + 1)
         return rid
@@ -1155,8 +1258,8 @@ class Database:
         clash = self.unique_clashes(t["key"], {k: values[k] for k in keys}, exclude_id)
         if clash:
             f, r = clash[0]
-            raise DBError(f"{r['title']} ({r['ref']}) already has this. {f['name']} must be "
-                          f"different for every {t['name'].lower()}.")
+            raise UniqueClash(f"{r['title']} ({r['ref']}) already has this. {f['name']} must be "
+                              f"different for every {t['name'].lower()}.")
 
     def update_record(self, rid: int, changes: dict, base: dict | None = None,
                       force: bool = False, check_unique: bool = True) -> dict:
@@ -1170,12 +1273,12 @@ class Database:
         with self.tx():
             cur = self.get_record(rid)
             if cur is None:
-                raise DBError("This record no longer exists.")
+                raise Gone("This record no longer exists.")
             if cur["deleted_at"]:
-                raise DBError("This record has been deleted by someone else.")
+                raise Binned("This record has been deleted by someone else.")
             t = bpm.get_type(self.blueprint, cur["type"])
             if t is None:
-                raise DBError("That list no longer exists.")
+                raise Gone("That list no longer exists.")
             data = dict(cur["data"])
             if base is not None and not force:
                 theirs = {k: data.get(k) for k in changes
@@ -1199,7 +1302,7 @@ class Database:
             if check_unique:
                 self._check_unique(t, {f["key"]: new for f, _old, new in changed}, rid)
             title = bpm.title_for(t, data, self.lookup) or cur["ref"]
-            now = validate.now_stamp()
+            now = self._now()
             # (example=0: once someone has changed an example record it is theirs,
             # and "remove the example records" must not erase it)
             self.conn.execute(
@@ -1253,7 +1356,7 @@ class Database:
                 r = self.get_record(rid)
                 if r and not r["deleted_at"]:
                     self.conn.execute("UPDATE records SET deleted_at=?, deleted_by=? WHERE id=?",
-                                      (validate.now_stamp(), self.user["id"], rid))
+                                      (self._now(), self.user["id"], rid))
                     self._audit("deleted", r, "", r["title"])
                     self._titles.pop(rid, None)
                     self._retitle_dependants(rid)     # they now say "(deleted)"
@@ -1295,7 +1398,7 @@ class Database:
                 # records that pointed at this one lose the link - and its name,
                 # which must not live on in their titles and search text
                 pointed = []
-                now = validate.now_stamp()
+                now = self._now()
                 for row in self.conn.execute("SELECT src, field FROM links WHERE dst=?",
                                              (rid,)).fetchall():
                     other = self.get_record(row["src"])
@@ -1395,40 +1498,43 @@ class Database:
                                  (record_id,))
         return [dict(r) for r in rows]
 
-    def add_note(self, record_id: int, body: str, kind: str = "Note", at: str | None = None) -> int:
+    def add_note(self, record_id: int, body: str, kind: str = "Note", at: str | None = None,
+                 nid: int | None = None) -> int:
         self._need_edit()
         body = body.strip()
         if not body:
             raise DBError("Write something first.")
-        now = validate.now_stamp()
+        now = self._now()
         with self.tx():
             rec = self._existing(record_id)
-            cur = self.conn.execute(
-                "INSERT INTO notes(record_id,kind,body,at,created_at,created_by) VALUES(?,?,?,?,?,?)",
-                (record_id, kind if kind in NOTE_KINDS else "Note", body, at or now, now,
+            nid = self._low_id("notes") if nid is None else nid
+            self.conn.execute(
+                "INSERT INTO notes(id,record_id,kind,body,at,created_at,created_by) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (nid, record_id, kind if kind in NOTE_KINDS else "Note", body, at or now, now,
                  self.user["id"]))
             self._audit("note-added", rec, kind, "", body[:200])
             # (example=0: a record someone has written on is no longer just an
             # example, and "remove the example records" must not erase it)
             self.conn.execute("UPDATE records SET updated_at=?, example=0 WHERE id=?",
                               (now, record_id))
-        return cur.lastrowid
+        return nid
 
     def _existing(self, record_id: int) -> dict:
         """The record something is about to be attached to. If someone else has
         erased it meanwhile, say so rather than save what could never be seen."""
         rec = self.get_record(record_id)
         if rec is None:
-            raise DBError("This record no longer exists.")
+            raise Gone("This record no longer exists.")
         if rec["deleted_at"]:
-            raise DBError("This record is in the recycle bin. Restore it first.")
+            raise Binned("This record is in the recycle bin. Restore it first.")
         return rec
 
     def update_note(self, note_id: int, body: str) -> None:
         self._need_edit()
         row = self.conn.execute("SELECT * FROM notes WHERE id=?", (note_id,)).fetchone()
         if row is None:
-            raise DBError("That note no longer exists.")
+            raise Gone("That note no longer exists.")
         if row["created_by"] != self.user["id"] and not self.is_admin:
             raise DBError("Only the person who wrote a note (or an administrator) can change it.")
         body = body.strip()
@@ -1436,7 +1542,7 @@ class Database:
             raise DBError("A note cannot be empty. Delete it instead.")
         with self.tx():
             self.conn.execute("UPDATE notes SET body=?, edited_at=? WHERE id=?",
-                              (body, validate.now_stamp(), note_id))
+                              (body, self._now(), note_id))
             self._audit("note-changed", self.get_record(row["record_id"]), row["kind"],
                         row["body"][:200], body[:200])
 
@@ -1472,23 +1578,25 @@ class Database:
         return [dict(r) for r in self.conn.execute(sql, args)]
 
     def add_task(self, title: str, due: str | None = None, record_id: int | None = None,
-                 assigned_to: int | None = None, detail: str = "", example: bool = False) -> int:
+                 assigned_to: int | None = None, detail: str = "", example: bool = False,
+                 tid: int | None = None) -> int:
         self._need_edit()
         title = title.strip()
         if not title:
             raise DBError("Say what needs doing.")
         with self.tx():
             rec = self._existing(record_id) if record_id else None
-            cur = self.conn.execute(
-                "INSERT INTO tasks(record_id,title,detail,due,assigned_to,created_at,created_by) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (record_id or None, title, detail.strip(), due or None, assigned_to,
-                 validate.now_stamp(), self.user["id"]))
+            tid = self._low_id("tasks") if tid is None else tid
+            self.conn.execute(
+                "INSERT INTO tasks(id,record_id,title,detail,due,assigned_to,created_at,created_by) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (tid, record_id or None, title, detail.strip(), due or None, assigned_to,
+                 self._now(), self.user["id"]))
             if rec:
                 self._audit("task-added", rec, "", "", title)
                 if not example:     # (as for notes)
                     self.conn.execute("UPDATE records SET example=0 WHERE id=?", (record_id,))
-        return cur.lastrowid
+        return tid
 
     def update_task(self, task_id: int, **fields) -> None:
         self._need_edit()
@@ -1509,7 +1617,7 @@ class Database:
             return
         with self.tx():
             self.conn.execute("UPDATE tasks SET done_at=?, done_by=? WHERE id=?",
-                              (validate.now_stamp() if done else None,
+                              (self._now() if done else None,
                                self.user["id"] if done else None, task_id))
             if row["record_id"]:
                 self._audit("task-done" if done else "task-reopened",
@@ -1535,7 +1643,7 @@ class Database:
                                  "WHERE record_id=? ORDER BY id DESC", (record_id,))
         return [dict(r) for r in rows]
 
-    def add_file(self, record_id: int, path: str) -> int:
+    def add_file(self, record_id: int, path: str, fid: int | None = None) -> int:
         self._need_edit()
         try:
             if os.path.getsize(path) > 100 * 1024 * 1024:
@@ -1548,13 +1656,15 @@ class Database:
         name = os.path.basename(path)
         with self.tx():
             rec = self._existing(record_id)
-            cur = self.conn.execute(
-                "INSERT INTO files(record_id,name,size,data,added_at,added_by) VALUES(?,?,?,?,?,?)",
-                (record_id, name, len(blob), blob, validate.now_stamp(), self.user["id"]))
+            fid = self._low_id("files") if fid is None else fid
+            self.conn.execute(
+                "INSERT INTO files(id,record_id,name,size,data,added_at,added_by) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (fid, record_id, name, len(blob), blob, self._now(), self.user["id"]))
             self._audit("file-added", rec, "", "", name)
             # (as for notes)
             self.conn.execute("UPDATE records SET example=0 WHERE id=?", (record_id,))
-        return cur.lastrowid
+        return fid
 
     def file_data(self, file_id: int) -> tuple[str, bytes] | None:
         row = self.conn.execute("SELECT name, data FROM files WHERE id=?", (file_id,)).fetchone()
@@ -1586,16 +1696,17 @@ class Database:
             out.append(d)
         return out
 
-    def save_view(self, type_key: str, name: str, spec: dict) -> int:
+    def save_view(self, type_key: str, name: str, spec: dict, vid: int | None = None) -> int:
         name = name.strip()
         if not name:
             raise DBError("Give the view a name.")
         with self.tx():
             self.conn.execute("DELETE FROM views WHERE type=? AND ulower(name)=? AND user_id=?",
                               (type_key, name.lower(), self.user["id"]))
-            cur = self.conn.execute("INSERT INTO views(type,name,spec,user_id) VALUES(?,?,?,?)",
-                                    (type_key, name, json.dumps(spec), self.user["id"]))
-        return cur.lastrowid
+            vid = self._low_id("views") if vid is None else vid
+            self.conn.execute("INSERT INTO views(id,type,name,spec,user_id) VALUES(?,?,?,?,?)",
+                              (vid, type_key, name, json.dumps(spec), self.user["id"]))
+        return vid
 
     def delete_view(self, view_id: int) -> None:
         with self.tx():     # (views are personal: only your own)
@@ -1604,8 +1715,8 @@ class Database:
 
     # ------------------------------------------------------------ backups
     def backup_dir(self) -> str:
-        base = os.path.splitext(os.path.basename(self.path))[0]
-        return os.path.join(os.path.dirname(self.path), base + " backups")
+        base = os.path.splitext(os.path.basename(self.shown_path))[0]
+        return os.path.join(os.path.dirname(self.shown_path), base + " backups")
 
     def backup_to(self, dest: str) -> str:
         """Write a complete copy of the CRM to dest (and its key file, if any)."""
@@ -1642,17 +1753,17 @@ class Database:
     def _dated_backups(self, folder: str) -> list[str]:
         """The automatic copies in the backups folder, oldest first - and only
         those: anything else kept there is the person's own and is left alone."""
-        base, ext = os.path.splitext(os.path.basename(self.path))
+        base, ext = os.path.splitext(os.path.basename(self.shown_path))
         made = re.compile(re.escape(base) + r" \d{4}-\d{2}-\d{2}" + re.escape(ext))
         return sorted(f for f in os.listdir(folder) if made.fullmatch(f))
 
     def daily_backup(self) -> str | None:
         """One automatic copy per day, keeping the newest few. Never raises."""
         try:
-            if os.path.basename(os.path.dirname(self.path)).endswith(" backups"):
+            if os.path.basename(os.path.dirname(self.shown_path)).endswith(" backups"):
                 return None         # (a backup opened to look at: no backups of backups)
             folder = self.backup_dir()
-            base, ext = os.path.splitext(os.path.basename(self.path))
+            base, ext = os.path.splitext(os.path.basename(self.shown_path))
             dest = os.path.join(folder, f"{base} {today_iso()}{ext}")
             if os.path.exists(dest):
                 return None
@@ -1668,7 +1779,7 @@ class Database:
     def last_backup(self) -> str | None:
         try:
             mine = self._dated_backups(self.backup_dir())
-            base = os.path.splitext(os.path.basename(self.path))[0]
+            base = os.path.splitext(os.path.basename(self.shown_path))[0]
             return mine[-1][len(base) + 1:len(base) + 11] if mine else None
         except OSError:
             return None

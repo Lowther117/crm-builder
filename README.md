@@ -9,7 +9,8 @@ starting point (or hand it a spreadsheet you already have), untick what you do
 not need, name it, done. Change the design whenever you like afterwards -
 nothing you remove is ever deleted, only hidden.
 
-Everything lives in **one file** on your own computer or shared drive. Nothing
+Everything lives in **one file** on your own computer, a shared drive or a
+synced folder (OneDrive, SharePoint, Dropbox...). Nothing
 is uploaded anywhere. Use it alone with no sign-in at all, or share the file
 with a small team where everyone has their own account. Windows and macOS, one
 window, Phosphor purple theme by default (the same look as Winnow).
@@ -178,10 +179,48 @@ minutes. Changes other people save appear within a few seconds; if two people
 change the same field of the same record, the second is asked whose version
 to keep.
 
-**Do not keep a live CRM in a synced folder** (OneDrive, Dropbox, iCloud,
-SharePoint sync). Sync tools copy the file while it is being written and
-create conflict copies. A normal folder or a mapped network share is right;
-the wizard warns if the folder looks synced.
+### Sharing through a synced folder (OneDrive, SharePoint, Dropbox, Google Drive, iCloud)
+
+No shared drive and no server? Put the `.crm` file in a folder that is synced
+for everyone and have each person open it from there. A sync service cannot
+share a live database (it copies whole files about and knows nothing of the
+locks a database relies on), so the app does not open the shared file at
+all. Instead:
+
+- Each person works on their **own copy**, kept in the app's own folder, so
+  it is fast and works offline. Every change is also written to that
+  person's own **queue**, and a copy of the queue goes into
+  `<name>.crm.sync/` beside the shared file. One writer per file is the one
+  thing sync services get right.
+- Every couple of minutes - and on opening, on closing, and on **Sync now**
+  (Tools > Sync, or the Sync entry in the sidebar) - one copy of the app
+  takes a short lock, applies every queue it can find to the shared file
+  (everyone's, oldest change first) and writes it back whole. Everyone else
+  picks the result up within seconds. Other people's changes therefore
+  appear a few minutes after they make them, not instantly.
+- **Nothing is dropped.** If two people change the same field while apart,
+  the later change wins and the clash is listed on the Sync page with both
+  values. An edit to a record someone else deleted brings the record back and
+  is flagged. A record that would duplicate a "must be different" value is
+  still added, and flagged. Mark each clash as sorted once you have looked.
+- Records made while apart keep their own numbers; references (`CON-0042`)
+  are given out when the change reaches the shared file, so one you saw
+  before syncing may change by one or two.
+- A queue is only forgotten once a shared file that has stayed put for a
+  minute says the changes are in - so a conflict copy the sync service might
+  make (`team (1).crm`, `team-LAPTOP.crm`) never loses anything. The Sync
+  page lists such copies; they can be deleted.
+- Changes are ordered by the second they were made, by each computer's own
+  clock. Keep the clocks right. A password changed on one computer works on
+  the others once it has been synced.
+- Encrypted CRMs stay encrypted: the queues use the same key, and the key
+  file travels with the shared file.
+
+The app decides by the folder's name (OneDrive, SharePoint, Dropbox, Google
+Drive, iCloud) or by a `.sync` folder beside the file. Opening a backup from
+a synced folder's `backups` folder opens it directly, as before. A file on a
+plain shared drive is still opened directly: that is faster, instant, and
+needs none of this.
 
 ## Backups, recycle bin, history
 
@@ -227,6 +266,8 @@ the wizard warns if the folder looks synced.
 `crm-builder-crash.log` and `crm-builder-selftest.txt` sit beside the exe, or
 beside the `.app` (never inside it). If that folder cannot be written to -
 `C:\Program Files`, `/Applications` - they go to `~/.crm-builder` instead.
+A `sync` folder in the same place holds the work copies and queues of CRMs
+opened from synced folders (one subfolder per shared file).
 Exports and print-outs start in your Downloads folder; **File > Default save
 folder** changes that.
 
@@ -245,6 +286,7 @@ crmbuilder/
   sheets.py        reading CSV and Excel files
   importing.py     the import engine (match columns, check, bring in - all or nothing)
   paths.py         settings, the app folder, the default save folder
+  sync.py          sharing through a synced folder: work copy, queues, the lock, the merge
   selftest.py      the self-test
   theme.py         the house theme - Phosphor purple, Dark, Light (shared with the other apps, unmodified)
   ui/
@@ -259,6 +301,7 @@ crmbuilder/
     listpage.py / board.py / recordpage.py / picker.py
     reports.py / importer.py / tools.py (exports, record sheet, backup, Check the data)
     admin.py       People and passwords, Settings, Recycle bin, History of changes
+    syncpage.py    the Sync page (synced folders): where things stand, clashes to look at
 ```
 
 Python 3.9 to 3.14, Tk 8.6 or 9. The only third-party packages are `openpyxl`

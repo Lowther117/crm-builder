@@ -19,6 +19,7 @@ SELF-TEST PASSED or PROBLEMS FOUND: n.
 """
 from __future__ import annotations
 
+import copy
 import datetime as _dt
 import importlib
 import importlib.util
@@ -33,7 +34,7 @@ import threading
 import time
 import traceback
 
-from . import APP_NAME, __version__, paths
+from . import APP_NAME, __version__, paths, security
 from . import blueprint as bpm
 from . import db as dbm
 from . import importing, sheets, templates, validate
@@ -201,6 +202,156 @@ def _versions(rep: Report, strict: bool, expect_encryption: bool):
             rep.ok(f"Encryption: SQLCipher {row[0] if row else '?'}")
         except Exception as exc:  # noqa: BLE001
             rep.fail("Encryption", f"the module loads but does not work: {exc}")
+
+
+# ------------------------------------------------------------ synced folder
+@_stepped
+def _synced_folder(step, tmp: str, opened: list, encrypt: bool = False):
+    """Two people share one CRM through a 'synced folder' (here: a plain
+    folder, which is exactly what a sync client gives each of them)."""
+    from . import sync as syncm
+    if encrypt and dbm.sqlcipher_module() is None:
+        raise _Skip("the encryption module is not installed")
+    settle, ack, every = syncm.LOCK_SETTLE_SECONDS, syncm.ACK_DELAY_SECONDS, syncm.MIRROR_EVERY_SECONDS
+    syncm.LOCK_SETTLE_SECONDS, syncm.ACK_DELAY_SECONDS, syncm.MIRROR_EVERY_SECONDS = 0.05, 0, 0
+    machine = syncm._machine
+    try:
+        step("make a CRM in a synced folder")
+        folder = os.path.join(tmp, "OneDrive - Shared", "locked" if encrypt else "crm")
+        os.makedirs(folder)
+        shared = os.path.join(folder, "team.crm")
+        need(syncm.wants_sync(shared), "a OneDrive path was not seen as a synced folder")
+        db, _code = dbm.Database.create(shared, _small_design("Synced"), mode="team",
+                                        name="Alex Admin", username="alex", password=ADMIN_PW,
+                                        encrypt=encrypt)
+        if encrypt:
+            need(os.path.isfile(shared + ".keys"), "no key file was made")
+        db.add_user("bo", "Bo Editor", "editor", EDITOR_PW)
+        a = syncm.SyncDatabase.adopt(db, local_root=os.path.join(tmp, "pc-a" + ("e" if encrypt else "")))
+        opened.append(a)
+        if encrypt:
+            need(a.encrypted and dbm.is_encrypted(a.path) and os.path.isfile(a.path + ".keys"),
+                 "the work copy is not encrypted like the shared file")
+            need(dbm.is_encrypted(a.store.queue.path), "the queue is not encrypted")
+        need(a.synced and a.shown_path == shared, "the adopted CRM does not know its shared file")
+        need(os.path.isfile(a.path) and a.path != shared, "no work copy was made")
+
+        step("a second person opens it from another computer")
+        syncm._machine = lambda: "laptop"
+        b = syncm.SyncDatabase.open_shared(shared, local_root=os.path.join(tmp, "pc-b" + ("e" if encrypt else "")))
+        opened.append(b)
+        need(b.login_needed() == "user", "the shared CRM did not ask who you are")
+        b.login("bo", EDITOR_PW)
+        need(b.store.slug != a.store.slug, "two people got the same queue")
+
+        step("both add records while apart")
+        ra = a.create_record("person", {"first_name": "Alex", "last_name": "Made"})
+        rb = b.create_record("person", {"first_name": "Bo", "last_name": "Made"})
+        need(ra != rb and ra >= dbm.LOW_IDS and rb >= dbm.LOW_IDS,
+             "records made apart did not get numbers of their own")
+        a.add_note(ra, "Alex's note")
+        tid = b.add_task("Bo's task", record_id=rb)
+        need(a.store.pending_count() == 2 and b.store.pending_count() == 2,
+             f"the queues are wrong ({a.store.pending_count()}, {b.store.pending_count()})")
+        need(os.path.isfile(a.store.mirror_path) and os.path.isfile(b.store.mirror_path),
+             "the queues were not copied to the shared folder")
+
+        step("merge")
+        out = a.sync_now()
+        need(not out.get("busy"), "the lock was taken by nobody")
+        need(out["sent"] == 2 and out["received"] == 2, f"the merge summary is wrong: {out}")
+        need(len(a.records("person")) == 2, "the merge lost a record")
+        b.sync_now()
+        need({r["id"] for r in b.records("person")} == {ra, rb}, "the other copy did not catch up")
+        need([n["body"] for n in b.notes(ra)] == ["Alex's note"], "a note did not travel")
+        need(any(t["id"] == tid for t in a.tasks(record_id=rb)), "a task did not travel")
+        refs = sorted(r["ref"] for r in b.records("person"))
+        need(refs == ["PER-0001", "PER-0002"], f"references clash after the merge: {refs}")
+        need(not os.path.exists(a.store.lock_path), "the lock was left behind")
+
+        step("the same field changed by two people")
+        a.update_record(rb, {"last_name": "Alexwrote"})
+        time.sleep(1.1)       # (changes are ordered by the second they were made)
+        b.update_record(rb, {"last_name": "Bowrote"})
+        out = a.sync_now()
+        need(out["conflicts"] == 1, f"the clash was not flagged: {out}")
+        b.sync_now()
+        need(a.get_record(rb)["data"]["last_name"] == b.get_record(rb)["data"]["last_name"] == "Bowrote",
+             "the later change did not win")
+        clashes = b.conflicts()
+        need(len(clashes) == 1 and clashes[0]["field"] == "last_name"
+             and clashes[0]["theirs"] == "Alexwrote" and clashes[0]["mine"] == "Bowrote",
+             f"the clash is not described right: {clashes}")
+        b.resolve_sync_conflict(clashes[0]["id"])
+        b.sync_now()
+        a.store.refresh(a)
+        need(not a.conflicts(), "marking a clash as sorted did not reach the other copy")
+
+        step("a record deleted by one and written on by the other")
+        a.delete_records([ra])
+        b.add_note(ra, "Bo writes on it anyway")
+        a.sync_now()
+        b.sync_now()
+        need(not a.get_record(ra)["deleted_at"] and not b.get_record(ra)["deleted_at"],
+             "the record written on after being deleted was not restored")
+        need(len(b.notes(ra)) == 2, "the note on the restored record was lost")
+        need(a.conflicts(), "the restore was not flagged")
+
+        step("a file, a design change and a password change travel")
+        attached = os.path.join(tmp, "synced-file.txt")
+        with open(attached, "w", encoding="utf-8") as fh:
+            fh.write("travelling")
+        fid = a.add_file(rb, attached)
+        bp = copy.deepcopy(a.blueprint)
+        bp["name"] = "Synced, renamed"
+        a.save_blueprint(bp, note="renamed")
+        b.set_password(b.user["id"], EDITOR_PW + "x", EDITOR_PW)
+        a.sync_now()
+        b.sync_now()
+        a.store.refresh(a)
+        need(b.file_data(fid) == ("synced-file.txt", b"travelling"), "the file did not travel")
+        need(b.name == "Synced, renamed", "the design change did not travel")
+        row = a.conn.execute("SELECT pw FROM users WHERE username='bo'").fetchone()
+        need(security.verify_password(EDITOR_PW + "x", row["pw"]), "the password change did not travel")
+        need(not any(e["method"] == "set_password" and "bopassword" in str(e["args"])
+                     for e in b.store.queue.pending()), "a password was queued in the clear")
+
+        step("queues are forgotten once the shared file has them")
+        for _ in range(3):
+            a.store._acknowledge()
+            b.store._acknowledge()
+        a.store.refresh(a)
+        b.store.refresh(b)
+        need(a.store.pending_count() == 0, "a sent queue was kept")
+        need(b.store.pending_count() == 0, "a queue applied by the other person was kept")
+
+        step("working offline")
+        hidden = shared + ".away"
+        os.replace(shared, hidden)
+        try:
+            rc = b.create_record("person", {"first_name": "Off", "last_name": "Line"})
+            need(b.auto_sync() is None, "syncing without the shared file did not stay quiet")
+            need(b.get_record(rc), "a record made offline was lost")
+        finally:
+            os.replace(hidden, shared)
+        b.sync_now()
+        a.sync_now()
+        need(a.get_record(rc)["title"] == "Off Line", "the offline record did not go in once back")
+
+        step("a fresh copy from the shared file")
+        b.close()
+        c = syncm.SyncDatabase.open_shared(shared, local_root=os.path.join(tmp, "pc-c" + ("e" if encrypt else "")))
+        opened.append(c)
+        c.login("alex", ADMIN_PW)
+        need(len(c.records("person")) == 3, "a third computer does not see everything")
+        copies = a.store.conflict_copies()
+        need(copies == [], f"a conflict copy was imagined: {copies}")
+        with open(os.path.join(folder, "team (1).crm"), "wb") as fh:
+            fh.write(b"x")
+        need(a.store.conflict_copies(), "a conflict copy was not noticed")
+    finally:
+        syncm.LOCK_SETTLE_SECONDS, syncm.ACK_DELAY_SECONDS, syncm.MIRROR_EVERY_SECONDS = settle, ack, every
+        syncm._machine = machine
 
 
 # ---------------------------------------------------------------- validation
@@ -1149,6 +1300,10 @@ def run_selftest(gui: bool = True, expect_encryption: bool = False,
         rep.section("People, passwords and encryption")
         rep.check("Team CRM: accounts, sign-in and permissions", _users, tmp, opened)
         rep.check("Encrypted CRM", _encryption, tmp, opened)
+
+        rep.section("Sharing through a synced folder")
+        rep.check("Two computers, one shared file", _synced_folder, tmp, opened)
+        rep.check("Two computers, one encrypted shared file", _synced_folder, tmp, opened, True)
 
         rep.section("Importing")
         rep.check("CSV import", _csv_import, tmp, opened)

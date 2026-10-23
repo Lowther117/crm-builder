@@ -733,4 +733,4 @@ class HomePage(Page):
             last = "Last automatic backup: " + lower_first(words)
         else:
             last = "No backup yet"
-        self.footer.configure(text=f"Kept in {self.db.path}  ·  {last}")
+        self.footer.configure(text=f"Kept in {self.db.shown_path}  ·  {last}")

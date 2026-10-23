@@ -402,19 +402,20 @@ class PeoplePage(_ScrollPage):
                 "who changed what.",
                 "You become the administrator: you add people and decide who can change records "
                 "and who can only look.",
-                "Put the CRM file on a shared drive that everyone can reach, and have everyone "
-                f"open that same file. Do not use a synced folder ({SYNC_NAMES}): two people "
-                "saving at once would damage the file."):
+                "Put the CRM file where everyone can reach it - a shared network drive, or a "
+                f"folder that is synced for all of you ({SYNC_NAMES}) - and have everyone open "
+                "that same file. In a synced folder the app keeps everyone's changes in step "
+                "itself (see Tools > Sync)."):
             row = ttk.Frame(card, style="Panel.TFrame")
             row.pack(fill="x", pady=(6, 0))
             ttk.Label(row, text="•", style="PanelDim.TLabel").pack(side="left", anchor="n", padx=(2, 8))
             lab = ttk.Label(row, text=text, style="Panel.TLabel", justify="left")
             lab.pack(side="left", fill="x", expand=True)
             wrap_to(lab, row, margin=30)
-        if paths.looks_synced(db.path):
-            self.para(card, "This CRM is in a synced folder at the moment. Move the file to a "
-                            "shared drive before other people start using it.",
-                      style="PanelWarn.TLabel", pady=(10, 0))
+        if getattr(db, "synced", False):
+            self.para(card, "This CRM is in a synced folder, so other people can open the same "
+                            "file from their own computers once it has synced to them.",
+                      style="PanelDim.TLabel", pady=(10, 0))
         self.share_btn = ttk.Button(card, text="Share this CRM with other people…",
                                     style="Accent.TButton", command=self.share)
         self.share_btn.pack(anchor="w", pady=(14, 0))
@@ -755,11 +756,20 @@ class SettingsPage(_ScrollPage):
         else:
             ttk.Label(row, text=db.name, style="Panel.TLabel").pack(side="left")
 
-        right, _lab = self.line(card, "Everything is kept in one file:", db.path)
-        ttk.Button(right, text="Show in folder", command=lambda: reveal_file(app, db.path)).pack(side="right")
-        if paths.looks_synced(db.path):
-            self.para(card, f"This file is in a synced folder ({SYNC_NAMES}). That is fine for one "
-                            "person on one computer, but do not open it on two computers at once.",
+        right, _lab = self.line(card, "Everything is kept in one file:", db.shown_path)
+        ttk.Button(right, text="Show in folder",
+                   command=lambda: reveal_file(app, db.shown_path)).pack(side="right")
+        if getattr(db, "synced", False):
+            row = ttk.Frame(card, style="Panel.TFrame")
+            row.pack(fill="x", pady=(6, 0))
+            ttk.Label(row, text="This file is in a synced folder, so the app works on a copy and "
+                                "merges everyone's changes into it.", style="PanelDim.TLabel",
+                      justify="left").pack(side="left")
+            widgets.link(row, "Sync", lambda: app.go("sync"),
+                         style="PanelLink.TLabel").pack(side="left", padx=(8, 0))
+        elif paths.looks_synced(db.path):
+            self.para(card, f"This file is in a synced folder ({SYNC_NAMES}) but is open directly. "
+                            "That is fine for one person on one computer only.",
                       style="PanelWarn.TLabel", pady=(6, 0))
 
         s = db.stats()
