@@ -109,6 +109,7 @@ def prepare(db, type_key: str, rows: list[list[str]], mapping: dict, options: di
     fields = {f["key"]: f for f in bpm.active_fields(t)}
     cols = [(i, fields[k]) for i, k in mapping.items() if k in fields]
     seen_options: dict[str, list[str]] = {}    # every new value met, for checking later rows
+    seen_options_low: dict[str, set[str]] = {}
     creatable = {f["key"]: link_can_create(db, f) for _i, f in cols if f["kind"] == "link"}
     link_index: dict[str, dict[str, int]] = {}
 
@@ -171,7 +172,9 @@ def prepare(db, type_key: str, rows: list[list[str]], mapping: dict, options: di
                 for p in parts:
                     if p.lower() not in known and len(p) <= 60:
                         row_options.setdefault(f["key"], []).append(p)
-                        if p.lower() not in [x.lower() for x in seen_options.get(f["key"], [])]:
+                        low = seen_options_low.setdefault(f["key"], set())
+                        if p.lower() not in low:
+                            low.add(p.lower())
                             seen_options.setdefault(f["key"], []).append(p)
                 field = dict(f, options=validate.options_of(f) + seen_options.get(f["key"], []))
             value, err = validate.normalise(field, text, resolve)
@@ -260,6 +263,8 @@ def prepare(db, type_key: str, rows: list[list[str]], mapping: dict, options: di
     # only rows that will actually be imported may add options or create linked records
     new_options: dict[str, list[str]] = {}
     new_links: dict[str, list[str]] = {}
+    have_low: dict[str, set[str]] = {}
+    names_low: dict[str, set[str]] = {}
     for r in out:
         if r["action"] not in ("add", "update"):
             continue
@@ -267,12 +272,16 @@ def prepare(db, type_key: str, rows: list[list[str]], mapping: dict, options: di
             if key in r["errors"]:
                 continue
             have = new_options.setdefault(key, [])
+            low = have_low.setdefault(key, set())
             for v in values:
-                if v.lower() not in [x.lower() for x in have]:
+                if v.lower() not in low:
+                    low.add(v.lower())
                     have.append(v)
         for key, name in r["pending_links"].items():
             names = new_links.setdefault(key, [])
-            if name.lower() not in [x.lower() for x in names]:
+            low = names_low.setdefault(key, set())
+            if name.lower() not in low:
+                low.add(name.lower())
                 names.append(name)
     new_options = {k: v for k, v in new_options.items() if v}
     return {"rows": out, "new_options": new_options, "new_links": new_links, "summary": counts,

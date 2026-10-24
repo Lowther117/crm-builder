@@ -954,8 +954,20 @@ class SyncDatabase(dbm.Database):
             self._buffer.clear()
             return
         q = self.store.queue
-        for ts, method, args, kw, blob in self._buffer:
-            q.add(ts, self.user["username"] if self.user else "", method, args, kw, blob)
+        # one queue transaction for the lot (an import queues a change per row)
+        own = not q.conn.in_transaction
+        if own:
+            q.conn.execute("BEGIN IMMEDIATE")
+        try:
+            for ts, method, args, kw, blob in self._buffer:
+                q.add(ts, self.user["username"] if self.user else "", method, args, kw, blob)
+            if own:
+                q.conn.execute("COMMIT")
+        except BaseException:
+            if own:
+                with contextlib.suppress(Exception):
+                    q.conn.execute("ROLLBACK")
+            raise
         self._buffer.clear()
         self.store.mirror(now=False)
 

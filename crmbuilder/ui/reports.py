@@ -366,15 +366,23 @@ def write_report(path: str, report: dict) -> None:
     if path.lower().endswith(".xlsx"):
         import openpyxl
         from openpyxl.styles import Font
+
+        from .tools import _BAD_CELL_CHARS
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Report"
         ws.append(head)
         for r in report["rows"]:
-            line = [r["label"], r["value"]]
+            label = r["label"]
+            if isinstance(label, str):
+                label = _BAD_CELL_CHARS.sub("", label)
+            line = [label, r["value"]]
             if report["show_share"]:
                 line.append(r["share"])
             ws.append(line)
+            cell = ws.cell(row=ws.max_row, column=1)
+            if isinstance(cell.value, str) and cell.data_type != "s":
+                cell.data_type = "s"        # (text from records stays text, never a formula)
         last = ["Total" if report["how"] != "avg" else "Overall", report["total"]]
         if report["show_share"]:
             last.append(1 if report["total"] else None)
