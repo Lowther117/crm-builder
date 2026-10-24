@@ -16,7 +16,7 @@ for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass
 if not defined PY goto :nopython
 if not exist "%PY%" goto :nopython
 "%PY%" -m venv "%VENV%"
-if errorlevel 1 ( echo Could not create the environment. & pause & exit /b 1 )
+if errorlevel 1 ( echo Could not create the environment. & rmdir /s /q "%VENV%" 2>nul & pause & exit /b 1 )
 "%VENV%\Scripts\python.exe" -m pip install --upgrade pip >nul
 "%VENV%\Scripts\python.exe" -m pip install --only-binary :all: -r "%~dp0requirements.txt"
 if errorlevel 1 goto :nodeps

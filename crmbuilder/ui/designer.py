@@ -69,6 +69,7 @@ class DesignerPage(Page):
         self._kind_touched = False
         self._preview_after = None
         self._preview_shown = None
+        self._examples: dict = {}       # list key -> data of its newest record (or None)
         self._build()
         self.ready = True
         self._draw_lists()
@@ -311,7 +312,7 @@ class DesignerPage(Page):
         self.add_entry.bind("<Return>", lambda _e: self.quick_add() or "break")
         self.add_kind_box.bind("<Return>", lambda _e: self.quick_add() or "break")
         self.add_kind_box.bind("<<ComboboxSelected>>", lambda _e: self._kind_picked())
-        self.add_name.trace_add("write", self._add_name_typed)
+        widgets.trace_var(self.add_name, self.add_entry, self._add_name_typed)
 
         ttk.Frame(card, style="Border.TFrame", height=1).pack(fill="x", pady=(10, 8))
         bar = ttk.Frame(card, style="Panel.TFrame")
@@ -737,9 +738,9 @@ class DesignerPage(Page):
                                             for lab in (self.title_help, self.board_help,
                                                         self.prefix_note)])
 
-        self.name_var.trace_add("write", self._name_typed)
-        self.plural_var.trace_add("write", self._plural_typed)
-        self.prefix_var.trace_add("write", self._prefix_typed)
+        widgets.trace_var(self.name_var, self.name_entry, self._name_typed)
+        widgets.trace_var(self.plural_var, self.plural_entry, self._plural_typed)
+        widgets.trace_var(self.prefix_var, self.prefix_entry, self._prefix_typed)
         self._paint_prefix()
         self._fill_choices()
 
@@ -852,12 +853,15 @@ class DesignerPage(Page):
     def _title_example(self, t: dict) -> str:
         if bpm.get_type(self.saved, t["key"]) is None:
             return ""
-        try:
-            for r in self.db.records(t["key"])[:1]:
-                return bpm.title_for(t, r["data"], self.db.lookup)
-        except dbm.DBError:
-            pass
-        return ""
+        # (read once per list: this runs after every change on the page)
+        if t["key"] not in self._examples:
+            try:
+                recs = self.db.records(t["key"])
+            except dbm.DBError:
+                return ""
+            self._examples[t["key"]] = recs[0]["data"] if recs else None
+        data = self._examples[t["key"]]
+        return bpm.title_for(t, data, self.db.lookup) if data is not None else ""
 
     def _title_picked(self):
         t = self.cur()

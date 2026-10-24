@@ -464,9 +464,16 @@ class SyncStore:
         self._beat_at = time.time()
         if self._lock:
             self._lock["beat"] = validate.now_stamp()
-            with contextlib.suppress(OSError):
-                with open(self.lock_path, "w", encoding="utf-8") as fh:
+            # written beside it and swapped in: a rival must never read half a
+            # lock, take it for a broken one and delete it
+            tmp = f"{self.lock_path}.{os.urandom(3).hex()}.part"
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
                     json.dump(self._lock, fh)
+                os.replace(tmp, self.lock_path)
+            except OSError:
+                with contextlib.suppress(OSError):
+                    os.remove(tmp)
 
     # ------------------------------------------------------------ merge
     def _open_copy(self, path: str) -> dbm.Database:
@@ -865,6 +872,7 @@ class SyncDatabase(dbm.Database):
         self.store: SyncStore | None = None
         self._jdepth = 0
         self._buffer: list = []
+        self._kept = 0          # buffer[:_kept]: saved, but queueing them failed
 
     @property
     def shown_path(self) -> str:
@@ -918,6 +926,8 @@ class SyncDatabase(dbm.Database):
         self._journal("recover", record[0], record[1], blob)
 
     def close(self):
+        with contextlib.suppress(Exception):
+            self._retry_flush()
         super().close()
         if self.store is not None:
             self.store.close()
@@ -928,10 +938,17 @@ class SyncDatabase(dbm.Database):
             with contextlib.suppress(Exception):
                 self.conn.close()
             self.conn = None
-        _copy_whole(merged, self.path)
-        if os.path.isfile(merged + ".keys"):
-            _copy_whole(merged + ".keys", self.path + ".keys")
-            self.keyfile = security.KeyFile.load(self.path)
+        try:
+            _copy_whole(merged, self.path)
+            if os.path.isfile(merged + ".keys"):
+                _copy_whole(merged + ".keys", self.path + ".keys")
+                self.keyfile = security.KeyFile.load(self.path)
+        except BaseException:
+            # (the work copy is swapped whole or not at all: carry on with it)
+            with contextlib.suppress(Exception):
+                self._connect()
+                self._after_connect()
+            raise
         self._connect()
         self._after_connect()
         self._titles.clear()
@@ -944,14 +961,23 @@ class SyncDatabase(dbm.Database):
 
     # ----------------------------------------------------------- queue
     def _on_rollback(self) -> None:
-        self._buffer.clear()
+        del self._buffer[self._kept:]
 
     def _on_commit(self) -> None:
-        self._flush()
+        # (inside a queued call its own change is not in the buffer yet: the
+        # flush comes straight after it, from _journal, and takes the lot)
+        if not self._jdepth:
+            self._flush()
+
+    def _retry_flush(self) -> None:
+        """Queue changes that were saved but could not be queued at the time."""
+        if self._buffer and self.conn is not None and not self.conn.in_transaction:
+            self._flush()
 
     def _flush(self) -> None:
         if not self._buffer or self.store is None or self.store.queue is None:
             self._buffer.clear()
+            self._kept = 0
             return
         q = self.store.queue
         # one queue transaction for the lot (an import queues a change per row)
@@ -963,12 +989,20 @@ class SyncDatabase(dbm.Database):
                 q.add(ts, self.user["username"] if self.user else "", method, args, kw, blob)
             if own:
                 q.conn.execute("COMMIT")
-        except BaseException:
+        except BaseException as exc:
             if own:
                 with contextlib.suppress(Exception):
                     q.conn.execute("ROLLBACK")
+            # The change itself is saved; it stays in the buffer and is queued
+            # with the next one (or on the next sync, or on closing).
+            self._kept = len(self._buffer)
+            if isinstance(exc, Exception) and not isinstance(exc, dbm.DBError):
+                raise dbm.DBError("Your change was saved, but it could not be added to the "
+                                  "changes waiting to sync yet. It will be tried again "
+                                  f"automatically.\n\n({exc})") from exc
             raise
         self._buffer.clear()
+        self._kept = 0
         self.store.mirror(now=False)
 
     def _journal(self, method: str, args: list, kw: dict, blob) -> None:
@@ -1060,6 +1094,7 @@ class SyncDatabase(dbm.Database):
     def sync_now(self) -> dict:
         """Merge, or if someone else is merging, at least pick up their result."""
         try:
+            self._retry_flush()
             out = self.store.merge(self)
         except dbm.DBError as exc:
             self.store.last_error = str(exc)
@@ -1078,6 +1113,7 @@ class SyncDatabase(dbm.Database):
         now = time.time()
         try:
             changed = False
+            self._retry_flush()
             if store._mirror_dirty:
                 store.mirror()
             if store.shared_changed() and now - store.last_refresh > REFRESH_EVERY_SECONDS:

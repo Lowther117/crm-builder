@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import os
 import re
+import sqlite3
 import sys
 import time
 import tkinter as tk
@@ -513,7 +514,7 @@ class App:
             # made by the wizard in a synced folder: carry on the shared way
             try:
                 db = sync.SyncDatabase.adopt(db)
-            except dbm.DBError as exc:
+            except (dbm.DBError, OSError, sqlite3.Error) as exc:
                 widgets.error(self, "Could not set up sharing",
                               f"{exc}\n\nThe CRM is open directly instead. Do not open it on "
                               "another computer until this is sorted out.")

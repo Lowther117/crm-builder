@@ -48,7 +48,7 @@ if [ ! -x "$VENV/bin/python" ]; then
     echo "Run build-app.command once; it installs a suitable Python."
     read -r; exit 1
   }
-  "$PY" -m venv "$VENV" || { echo "Could not create the environment."; read -r; exit 1; }
+  "$PY" -m venv "$VENV" || { rm -rf "$VENV"; echo "Could not create the environment."; read -r; exit 1; }
   "$VENV/bin/python" -m pip install --upgrade pip >/dev/null
   "$VENV/bin/python" -m pip install --only-binary :all: -r requirements.txt || {
     # remove the half-made environment, or the next run would see it, skip the

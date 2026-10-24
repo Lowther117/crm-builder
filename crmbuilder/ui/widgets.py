@@ -869,8 +869,12 @@ class LongTextEditor(Editor):
         return self.text.get("1.0", "end-1c")
 
     def set(self, value):
+        # (a disabled Text ignores delete and insert: a read-only form must still update)
+        state = str(self.text.cget("state"))
+        self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         self.text.insert("1.0", "" if value is None else str(value))
+        self.text.configure(state=state)
         self.text.edit_modified(False)
         self.text.edit_reset()
 

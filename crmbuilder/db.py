@@ -361,8 +361,6 @@ class Database:
         try:
             yield
             self.conn.execute("COMMIT")
-            self._keys_before = None
-            self._on_commit()
         except BaseException as exc:
             # Never leave it open: an open transaction would take in every
             # later save and none of them would ever reach the file.
@@ -374,6 +372,9 @@ class Database:
             if isinstance(exc, _db_errors()):
                 raise DBError(self._explain(exc)) from exc
             raise
+        # (outside the try: the change is in the file now, whatever happens next)
+        self._keys_before = None
+        self._on_commit()
 
     def _explain(self, exc) -> str:
         """Why a save failed, for the person at the keyboard."""
