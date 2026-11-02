@@ -21,7 +21,7 @@ if errorlevel 1 ( echo Could not create the environment. & rmdir /s /q "%VENV%" 
 "%VENV%\Scripts\python.exe" -m pip install --only-binary :all: -r "%~dp0requirements.txt"
 if errorlevel 1 goto :nodeps
 REM  optional: encrypted CRM files; fine if there is no wheel for this Python
-"%VENV%\Scripts\python.exe" -m pip install --only-binary :all: sqlcipher3-wheels >nul 2>&1
+"%VENV%\Scripts\python.exe" -m pip install --only-binary :all: "sqlcipher3-wheels>=0.5,<1" >nul 2>&1
 if errorlevel 1 echo Note: no encryption package for this Python - encrypted CRM files will not be available.
 
 :run

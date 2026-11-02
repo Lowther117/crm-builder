@@ -59,7 +59,7 @@ if [ ! -x "$VENV/bin/python" ]; then
     read -r; exit 1
   }
   # optional: encrypted CRM files; fine if there is no wheel for this Python
-  "$VENV/bin/python" -m pip install --only-binary :all: sqlcipher3-wheels >/dev/null 2>&1 \
+  "$VENV/bin/python" -m pip install --only-binary :all: "sqlcipher3-wheels>=0.5,<1" >/dev/null 2>&1 \
     || echo "Note: no encryption package for this Python - encrypted CRM files will not be available."
 fi
 exec "$VENV/bin/python" crm_builder.py "$@"

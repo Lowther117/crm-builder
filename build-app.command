@@ -106,7 +106,7 @@ make_env() {
 # package, so the very newest Python may have no wheel for it yet. pip's own
 # output goes to the log only - "no matching distribution" is not an error here.
 try_encryption() {
-  "$VPY" -m pip install --only-binary :all: sqlcipher3-wheels >> "$LOG" 2>&1 \
+  "$VPY" -m pip install --only-binary :all: "sqlcipher3-wheels>=0.5,<1" >> "$LOG" 2>&1 \
     && "$VPY" -c "import sqlcipher3.dbapi2" >> "$LOG" 2>&1
 }
 
@@ -155,7 +155,7 @@ else
   echo "      this Mac, so encryption will not be available in this build."
   echo "      Everything else works as normal."
 fi
-"$VPY" -m pip install --only-binary :all: pyinstaller || die "PyInstaller would not install."
+"$VPY" -m pip install --only-binary :all: "pyinstaller>=6.11,<7" || die "PyInstaller would not install."
 
 echo "[4/7] Checking the code before packaging..."
 "$VPY" -c "import sys, pkgutil, importlib; sys.path.insert(0,'.'); import crmbuilder, openpyxl; n=[importlib.import_module(m.name) for m in pkgutil.walk_packages(crmbuilder.__path__,'crmbuilder.')]; print('      imports ok:', len(n), 'modules')" \

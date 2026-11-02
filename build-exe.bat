@@ -39,7 +39,7 @@ echo [3/6] Installing dependencies (wheels only, no compiling)...
 "%VPY%" -m pip install --upgrade pip wheel >> "%LOG%" 2>&1
 "%VPY%" -m pip install --only-binary :all: -r "%~dp0requirements.txt" >> "%LOG%" 2>&1
 if errorlevel 1 goto :fail
-"%VPY%" -m pip install --only-binary :all: pyinstaller >> "%LOG%" 2>&1
+"%VPY%" -m pip install --only-binary :all: "pyinstaller>=6.11,<7" >> "%LOG%" 2>&1
 if errorlevel 1 goto :fail
 REM  Optional: sqlcipher3-wheels gives encrypted CRM files. It is a compiled
 REM  package, so the very newest Python may have no wheel for it yet. That is
@@ -51,7 +51,7 @@ REM  any libraries shipped beside it, but only when it really installed.
 set "ENC_EXTRA="
 set "ENC_EXPECT="
 echo Optional encryption package: >> "%LOG%"
-"%VPY%" -m pip install --only-binary :all: sqlcipher3-wheels >> "%LOG%" 2>&1
+"%VPY%" -m pip install --only-binary :all: "sqlcipher3-wheels>=0.5,<1" >> "%LOG%" 2>&1
 "%VPY%" -c "import sqlcipher3.dbapi2" >> "%LOG%" 2>&1
 if errorlevel 1 (
   echo       NOTE: there is no encryption package ^(sqlcipher3-wheels^) for this

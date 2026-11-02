@@ -1,5 +1,9 @@
+# Every package here has a floor (the oldest version these scripts were
+# tested with) and a ceiling at the next major version. A new major is
+# something to opt into after a test build, never something a routine
+# rebuild discovers for you - PyMuPDF 2.0 broke two builds that way (Nov 2026).
 # Needed. Reads and writes Excel files (import, export). Pure Python.
-openpyxl>=3.1
+openpyxl>=3.1,<4
 
 # Optional, and deliberately NOT listed here: sqlcipher3-wheels
 # It provides encrypted CRM files (SQLCipher). It is a compiled package with no
