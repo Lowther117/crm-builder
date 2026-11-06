@@ -51,7 +51,7 @@ class App:
         self.test_log: list = []
         self.test_answers: list = []
         self.settings = paths.load_settings() if not testing else {}
-        self.theme_name = theme.from_settings(self.settings)   # phosphor purple by default
+        self.theme_name = theme.from_settings(self.settings)   # phosphor glass by default
         self.dark = theme.is_dark(self.theme_name)
         self.c = styles.apply(root, self.theme_name)
         self.db: dbm.Database | None = None
@@ -419,7 +419,7 @@ class App:
 
     # ------------------------------------------------------------- theme
     def toggle_dark(self):
-        """Ctrl+D / Cmd+D: the next theme, Phosphor -> Dark -> Light."""
+        """Ctrl+D / Cmd+D: the next theme, Glass -> Phosphor -> Dark -> Light."""
         self.set_theme(theme.next_theme(self.theme_name))
 
     def set_theme(self, name: str):

@@ -13,7 +13,7 @@ Everything lives in **one file** on your own computer, a shared drive or a
 synced folder (OneDrive, SharePoint, Dropbox...). Nothing
 is uploaded anywhere. Use it alone with no sign-in at all, or share the file
 with a small team where everyone has their own account. Windows and macOS, one
-window, Phosphor purple theme by default (the same look as Winnow).
+window, Phosphor glass theme by default (the same look as the website and Winnow).
 
 Version 2 is a rebuild from scratch: one window instead of many, a far simpler
 Designer, and the wizard. It does not open files made by version 1.
@@ -288,7 +288,7 @@ crmbuilder/
   paths.py         settings, the app folder, the default save folder
   sync.py          sharing through a synced folder: work copy, queues, the lock, the merge
   selftest.py      the self-test
-  theme.py         the house theme - Phosphor purple, Dark, Light (shared with the other apps, unmodified)
+  theme.py         the house theme - Phosphor glass, Phosphor purple, Dark, Light (shared with the other apps, unmodified)
   ui/
     app.py         the window: sidebar, menus, navigation, lock, picking up other people's changes
     base.py        the Page class every page is built on
