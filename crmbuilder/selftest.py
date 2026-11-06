@@ -1198,7 +1198,7 @@ def _gui_tour(rep: Report, root, tmp: str, opened: list):
             if entered:
                 rep.fail(f"window: opening the '{key}' CRM", "the main window was not built")
             continue
-        for _pass in (0, 1, 2):        # all three themes, ending where it began
+        for _pass in (0, 1, 2, 3):     # all four themes, ending where it began
             _tour(rep, app, attempt, classes, key, theme())
             attempt(f"window: '{key}' switching theme from {theme()}", app.toggle_dark)
     rep.doing = "closing the window"
